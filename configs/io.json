@@ -1,0 +1,7 @@
+{
+  "tm1637": { "dio": 9, "clk": 10 },
+  "relay": { "pin": 25, "active_high": false },
+  "led":   { "r": 23, "g": 22, "b": 27 },
+  "button": { "pin": 24 }
+}
+

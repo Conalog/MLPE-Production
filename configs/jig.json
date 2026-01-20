@@ -1,0 +1,9 @@
+{
+  "jig_id": "oxdg70lbmb2u55a",
+  "stage": 1,
+  "vendor": "conalog",
+  "product": "guard_2_1",
+  "timezone": "auto",
+  "adc_scales": [6.0, 2.0, 1.0, 1.0]
+}
+

@@ -1,0 +1,6 @@
+paho-mqtt
+requests
+gpiozero
+lgpio
+smbus2
+colorzero
