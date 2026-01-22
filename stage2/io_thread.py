@@ -27,12 +27,14 @@ class IOThread:
     - TM1637도 best-effort로 유지(불량이면 표시 기능이 제한될 수 있음).
     """
 
-    def __init__(self, *, logger, tm1637_dio: int, tm1637_clk: int, led_pins=(23, 22, 27), button_pin: int = 24, adc_scales: list[float] | None = None):
+    def __init__(self, *, logger, tm1637_dio: int, tm1637_clk: int, led_pins=(23, 22, 27), button_pin: int = 24, relay_pin: int | None = None, relay_active_high: bool = True, adc_scales: list[float] | None = None):
         self._logger = logger
         self._tm_dio = tm1637_dio
         self._tm_clk = tm1637_clk
         self._led_pins = led_pins
         self._button_pin = button_pin
+        self._relay_pin = relay_pin
+        self._relay_active_high = relay_active_high
         self._adc_scales = adc_scales
 
         self._stop = threading.Event()
@@ -41,13 +43,14 @@ class IOThread:
         self._state = IOState()
 
         self._ready = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="stage1-io", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="stage2-io", daemon=True)
 
         # Best-effort devices (created inside thread as well)
         self._disp = None
         self._led = None
         self._btn = None
         self._adc = None
+        self._relay = None
 
     def start(self) -> None:
         self._thread.start()
@@ -55,6 +58,26 @@ class IOThread:
     def wait_until_ready(self, timeout: float = 5.0) -> bool:
         """초기화 완료될 때까지 대기"""
         return self._ready.wait(timeout=timeout)
+
+    def set_relay(self, on: bool) -> None:
+        """지그 릴레이를 제어합니다 (Best-effort)."""
+        with self._hw_lock:
+            if self._relay is None and self._relay_pin is not None:
+                try:
+                    from utils.relay import RelayController as Relay
+                    self._relay = Relay(pin=self._relay_pin, active_high=self._relay_active_high)
+                except Exception as e:
+                    log_event(self._logger, event="io_thread.relay.init.fail", stage="stage2", data={"error": str(e)})
+                    return
+
+            if self._relay is not None:
+                try:
+                    if on:
+                        self._relay.on()
+                    else:
+                        self._relay.off()
+                except Exception as e:
+                    log_event(self._logger, event="io_thread.relay.control.fail", stage="stage2", data={"error": str(e)})
 
     def get_ads1115_status(self) -> tuple[bool, Optional[str]]:
         with self._hw_lock:
@@ -113,7 +136,7 @@ class IOThread:
             try:
                 self._btn.wait_until_push()
             except Exception as e:
-                log_event(self._logger, event="io_thread.button.wait_fail", stage="stage1", data={"error": str(e)})
+                log_event(self._logger, event="io_thread.button.wait_fail", stage="stage2", data={"error": str(e)})
                 time.sleep(1.0)  # 에러 시 무한 루프 방지용 대기
         else:
             # 버튼이 없으면 진행할 수 없으므로 잠시 대기 후 리턴하거나 예외를 던질 수 있음
@@ -130,7 +153,7 @@ class IOThread:
                 log_event(self._logger, event="io_thread.tm1637.init.ok", stage="stage1")
             except Exception as e:
                 self._disp = None
-                log_event(self._logger, event="io_thread.tm1637.init.fail", stage="stage1", data={"error": str(e)})
+                log_event(self._logger, event="io_thread.tm1637.init.fail", stage="stage2", data={"error": str(e)})
 
         # LED
         if self._led is None:
@@ -153,7 +176,7 @@ class IOThread:
                 log_event(self._logger, event="io_thread.button.init.ok", stage="stage1", data={"pin": self._button_pin})
             except Exception as e:
                 self._btn = None
-                log_event(self._logger, event="io_thread.button.init.fail", stage="stage1", data={"error": str(e)})
+                log_event(self._logger, event="io_thread.button.init.fail", stage="stage2", data={"error": str(e)})
         
         self._ready.set()
 
@@ -168,6 +191,12 @@ class IOThread:
                 if self._led is not None:
                     self._led.set_color("off")
                     self._led.cleanup()
+            except Exception:
+                pass
+            try:
+                if self._relay is not None:
+                    self._relay.off()
+                    self._relay = None
             except Exception:
                 pass
             try:

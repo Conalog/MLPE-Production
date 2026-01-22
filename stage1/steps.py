@@ -3,6 +3,7 @@ import time
 import os
 import json
 import logging
+import numpy as np
 from typing import Any
 
 from common.test_base import TestCase
@@ -128,17 +129,19 @@ class FirmwareUploader(TestCase):
             subprocess.run(["probe-rs", "erase", "--chip", "nRF52810_xxAA"], check=True, timeout=20.0, capture_output=True)
             
             # Flash App 1, App 2, Boot
-            commands = [ (app_path, "0x4000"), (app_path, "0x21000"), (boot_path, "0x0") ]
-            for path, addr in commands:
+            commands = [ (app_path, "0x4000", "app"), (app_path, "0x21000", "app"), (boot_path, "0x0", "bootloader") ]
+            logs = []
+            for path, addr, name in commands:
                 subprocess.run([
                     "probe-rs", "download", path, "--chip", "nRF52810_xxAA", 
                     "--binary-format", "bin", "--base-address", addr
                 ], check=True, timeout=30.0, capture_output=True)
+                logs.append(f"Flash successful: {name} binary at {addr}")
                 if addr == "0x0": time.sleep(0.3)
             
             # Reset
             subprocess.run(["probe-rs", "reset", "--chip", "nRF52810_xxAA"], timeout=10.0, capture_output=True)
-            return {"code": 0, "log": "Firmware uploaded successfully"}
+            return {"code": 0, "log": "\n".join(logs)}
         except Exception as e:
             return {"code": E_FIRMWARE_UPLOAD_FAIL.code, "log": f"Upload error: {str(e)}"}
 
@@ -164,46 +167,86 @@ class CommTester(TestCase):
                     g.target_device.info = info
                     args["stick_uid"] = uid # ADC Tester에서 필요할 수 있지만 일단 globals에 넣을까 고민 중
                     return {"code": 0, "log": f"Comm verified via {uid} (ID: {device_id_hex})"}
-            time.sleep(1.0)
+            time.sleep(0.7)
             
         return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"Device {device_id_hex} did not respond to REQ_GET_INFO"}
 
 
-class ADCTester(TestCase):
+class RSDController(TestCase):
     def run(self, args: dict[str, Any]) -> dict[str, Any]:
+        device_id = g.target_device.device_id
+        uid = args.get("stick_uid")
+        rsd1 = args.get("rsd1", False)
+        rsd2 = args.get("rsd2", False)
+
+        if not device_id or not uid:
+            return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": "Device ID or Stick UID missing"}
+
+        try:
+            g.bridge.req_shutdown(device_id, uid, rsd1=rsd1, rsd2=rsd2)
+            time.sleep(0.1) # wait for settlement
+            log_msg = f"RSD Set: RSD1={rsd1}, RSD2={rsd2}"
+            return {"code": 0, "log": log_msg}
+        except Exception as e:
+            return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"RSD control error: {e}"}
+
+
+class ADCResultChecker(TestCase):
+    def run(self, args: dict[str, Any]) -> dict[str, Any]:
+        target_id = g.target_device.device_id
+        stick_uid = args.get("stick_uid")
+        check_type = args.get("check_type", "baseline")
+        stage = args.get("stage", "stage1")
+        adc_config = args.get("adc_config", {})
+
+        if not target_id or not stick_uid:
+            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": "Target ID or Stick UID missing"}
+
+        # Board type determination
         info = g.target_device.info
-        device_id_hex = g.target_device.device_id
-        uid = args.get("stick_uid") # CommTester에서 넘겨준 uid 사용
-        
-        if not info or not device_id_hex or not uid:
-            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": "Device info or Stick UID missing."}
-        
         vid, pid = info.get("vid"), info.get("pid")
-        if vid == 1 and pid == 2: # Guard 2.1
-            targets = {"vin1": 24.0, "vin2": 24.0, "vout": 48.0}
-        else:
-            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": f"Unknown board VID={vid}, PID={pid}"}
+        v_name = {1: "guard", 2: "booster"}.get(vid, "unknown")
+        p_name = {1: "1_1", 2: "2_1"}.get(pid, "unknown")
+        board_type = f"{v_name}_{p_name}"
 
-        if not g.bridge:
-            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": "Solar Bridge client not initialized."}
+        ranges = adc_config.get(stage, {}).get(board_type, {}).get(check_type, {})
+        if not ranges:
+            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": f"ADC ranges not found for {stage}/{board_type}/{check_type}"}
 
-        samples = g.bridge.dump_adc(device_id_hex, uid, duration=5.0)
-        
+        # Collect samples
+        samples = g.bridge.dump_adc(target_id, stick_uid, duration=1.0, logger=args["logger"])
         if not samples:
-            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": "No ADC samples collected"}
+            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": "Failed to collect ADC samples"}
 
-        v1_avg = sum(s.get("vin1", 0) for s in samples) / len(samples)
-        v2_avg = sum(s.get("vin2", 0) for s in samples) / len(samples)
-        vout_avg = sum(s.get("vout", 0) for s in samples) / len(samples)
-        
-        tolerance = 0.20
-        for key, target in targets.items():
-            actual = v1_avg if key == "vin1" else (v2_avg if key == "vin2" else vout_avg)
-            if not (target * (1 - tolerance) <= actual <= target * (1 + tolerance)):
-                return {"code": E_ADC_VERIFICATION_FAIL.code, "log": f"ADC {key} out of range: {actual:.2f}V"}
+        errors = []
+        result_details = []
 
-        return {"code": 0, "log": f"ADC Verified: V1={v1_avg:.1f}V, V2={v2_avg:.1f}V, Vout={vout_avg:.1f}V"}
+        for field_name, range_val in ranges.items():
+            min_v = range_val.get("min", 0)
+            max_v = range_val.get("max", 65536)
+            
+            # Analyze samples: Try raw field first (e.g. vin1_raw)
+            raw_field = f"{field_name}_raw"
+            if any(raw_field in s for s in samples):
+                 target_field = raw_field
+            else:
+                 target_field = field_name
 
+            values = [s.get(target_field) for s in samples if target_field in s and s.get(target_field) is not None]
+            if not values:
+                errors.append(f"Field {target_field} missing in samples")
+                continue
+                
+            avg_val = sum(values) / len(values)
+            result_details.append(f"{field_name} Raw: {avg_val:.1f}")
+            if not (min_v <= avg_val <= max_v):
+                errors.append(f"{field_name} out of range: {avg_val:.1f} (Exp: {min_v}~{max_v})")
+
+        res_log = ", ".join(result_details)
+        if errors:
+            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": f"FAILED ({check_type}): " + "; ".join(errors)}
+        else:
+            return {"code": 0, "log": f"PASSED ({check_type}): {res_log}"}
 
 
 def run_stage_test(
@@ -213,7 +256,8 @@ def run_stage_test(
     db_server,
     vendor,
     product,
-    stage_name: str = "stage1"
+    stage_name: str = "stage1",
+    adc_config: dict = {}
 ) -> AggregatedResult:
     results = AggregatedResult(test=stage_name, code=0)
     
@@ -223,19 +267,36 @@ def run_stage_test(
         ("Firmware Downloader", FirmwareDownloader()),
         ("Firmware Uploader", FirmwareUploader()),
         ("Comm Tester", CommTester()),
-        ("ADC Tester", ADCTester()),
+        # ADC Verification Phases
+        ("ADC (Baseline)", ADCResultChecker()),
+        ("RSD1 ON", RSDController()),
+        ("ADC (RSD1)", ADCResultChecker()),
+        ("RSD1+2 ON", RSDController()),
+        ("ADC (RSD1_2)", ADCResultChecker()),
+        ("RSD All OFF", RSDController()),
     ]
     
     context = {
+        "logger": logger,
         "io": io,
         "db_server": db_server,
         "vendor": vendor,
         "product": product,
+        "stage": stage_name,
+        "adc_config": adc_config,
     }
 
     final_code = 0
     total_steps = len(steps)
     for i, (name, step) in enumerate(steps, 1):
+        # Step specific overrides
+        if name == "ADC (Baseline)": context["check_type"] = "baseline"
+        elif name == "RSD1 ON": context.update({"rsd1": True, "rsd2": False})
+        elif name == "ADC (RSD1)": context["check_type"] = "rsd1"
+        elif name == "RSD1+2 ON": context.update({"rsd1": True, "rsd2": True})
+        elif name == "ADC (RSD1_2)": context["check_type"] = "rsd1_2"
+        elif name == "RSD All OFF": context.update({"rsd1": False, "rsd2": False})
+
         logger.info(f"[{i}/{total_steps}] Running: {name}...")
         res = step.run(context)
         detail = TestDetail(case=name, log=res["log"], code=res["code"])
@@ -243,11 +304,13 @@ def run_stage_test(
         
         if res["code"] != 0:
             final_code = res["code"]
-            logger.error(f"  --> [FAIL] {res['log']}")
+            for line in res["log"].splitlines():
+                logger.error(f"  --> [FAIL] {line}")
             log_event(logger, event=f"{stage_name}.step_failed", stage=stage_name, data={"case": name, "error": res["log"]})
             break # 중대 오류 시 시퀀스 중단
         else:
-            logger.info(f"  --> [OK] {res['log']}")
+            for line in res["log"].splitlines():
+                logger.info(f"  --> [OK] {line}")
             
         time.sleep(0.1)
 

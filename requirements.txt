@@ -4,3 +4,8 @@ gpiozero
 lgpio
 smbus2
 colorzero
+numpy
+pocketbase
+packaging
+pytz
+RPi.GPIO

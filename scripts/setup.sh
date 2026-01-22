@@ -44,6 +44,7 @@ if [ ! -d ".venv" ]; then
 fi
 source .venv/bin/bin/activate || source .venv/bin/activate
 pip install --upgrade pip
+echo "Installing Python dependencies (including PocketBase SDK)..."
 pip install -r requirements.txt
 
 echo ">>> [5/7] Configuring Hardware Permissions (udev)..."

@@ -7,14 +7,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from common.logging_utils import build_logger, ensure_log_dir, log_event
-from stage1.io_thread import IOThread
-from stage1.self_test import run_self_test
-from stage1 import globals as g
+from .io_thread import IOThread
+from .self_test import run_self_test
+from . import globals as g
 from common.solar_bridge import SolarBridgeClient
 
 
 @dataclass(frozen=True)
-class Stage1Config:
+class Stage2Config:
     jig_config_path: str
     io_config_path: str
     server_config_path: str
@@ -43,7 +43,7 @@ class Stage1Config:
     server_config: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_json(cls, jig_config_path: str, io_config_path: str, server_config_path: str, logs_base_dir: str) -> Stage1Config:
+    def from_json(cls, jig_config_path: str, io_config_path: str, server_config_path: str, logs_base_dir: str) -> Stage2Config:
         from common.config_utils import load_json, parse_jig_config, parse_stage1_pins
 
         jig_cfg = parse_jig_config(load_json(jig_config_path))
@@ -71,13 +71,13 @@ class Stage1Config:
             server_config=server_cfg,
         )
 
-def run_stage1(cfg: Stage1Config) -> int:
-    from stage1.self_test import check_internet
+def run_stage2(cfg: Stage2Config) -> int:
+    from .self_test import check_internet
     from common.error_codes import E_INTERNET_NOT_FOUND, E_DB_CONNECTION_FAILED
 
     # 1) Logger 생성
-    log_dir = ensure_log_dir(cfg.logs_base_dir, "stage1")
-    logger = build_logger(name="stage1", log_dir=log_dir, console=True, level=logging.INFO)
+    log_dir = ensure_log_dir(cfg.logs_base_dir, "stage2")
+    logger = build_logger(name="stage2", log_dir=log_dir, console=True, level=logging.INFO)
 
     # 2) db 서버 초기화
     from common.db_server import create_db_server
@@ -88,14 +88,6 @@ def run_stage1(cfg: Stage1Config) -> int:
     g.bridge = SolarBridgeClient(host=bridge_host, port=bridge_port, timeout=3.0)
     g.bridge.start()
     
-    # ADC 공식 데이터 로드
-    try:
-        with open("configs/adc_values.json", "r") as f:
-            adc_config = json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to load adc_values.json: {e}")
-        adc_config = {}
-
     # 3) main에서 세븐세그/LED/Button 제어 스레드 생성
     io = IOThread(
         logger=logger,
@@ -103,6 +95,8 @@ def run_stage1(cfg: Stage1Config) -> int:
         tm1637_clk=cfg.tm1637_clk,
         led_pins=(cfg.led_r, cfg.led_g, cfg.led_b),
         button_pin=cfg.button_pin,
+        relay_pin=cfg.relay_pin,
+        relay_active_high=cfg.relay_active_high,
         adc_scales=cfg.adc_scales,
     )
     io.start()
@@ -113,24 +107,24 @@ def run_stage1(cfg: Stage1Config) -> int:
         # 3-1) 인터넷 연결 확인
         io.set_loading(led_color="blue")
         net_ok = check_internet(timeout_s=3.0)
-        log_event(logger, event="boot.internet_check", stage="stage1", data={"ok": net_ok})
+        log_event(logger, event="boot.internet_check", stage="stage2", data={"ok": net_ok})
 
         if not net_ok:
             io.show_code(E_INTERNET_NOT_FOUND.code)
             logger.error(f"Internet connection failed (Code: {E_INTERNET_NOT_FOUND.code}). Check network and press button.")
             io.wait_for_button()
-            log_event(logger, event="stage1.boot.retry_requested", stage="stage1", data={"reason": "internet_fail"})
+            log_event(logger, event="stage2.boot.retry_requested", stage="stage2", data={"reason": "internet_fail"})
             continue
 
         # 3-2) DB 서버 연결 확인
         if db_server:
             db_ok = db_server.health_check(logger=logger)
-            log_event(logger, event="boot.db_check", stage="stage1", data={"ok": db_ok})
+            log_event(logger, event="boot.db_check", stage="stage2", data={"ok": db_ok})
             if not db_ok:
                 io.show_code(E_DB_CONNECTION_FAILED.code)
                 logger.error(f"DB Server connection failed (Code: {E_DB_CONNECTION_FAILED.code}). Check server status and press button.")
                 io.wait_for_button()
-                log_event(logger, event="stage1.boot.retry_requested", stage="stage1", data={"reason": "db_fail"})
+                log_event(logger, event="stage2.boot.retry_requested", stage="stage2", data={"reason": "db_fail"})
                 continue
         
         # 인터넷과 DB가 모두 준비되면 Init 루프 종료
@@ -146,7 +140,7 @@ def run_stage1(cfg: Stage1Config) -> int:
 
     # 5) 여기서 boot 로그용 데이터를 생성 (전송은 self-test와 통합)
     boot_data = {
-        "event": "stage1.boot",
+        "event": "stage2.boot",
         "jig_id": cfg.jig_id, 
         "vendor": cfg.vendor,
         "product": cfg.product,
@@ -164,7 +158,7 @@ def run_stage1(cfg: Stage1Config) -> int:
             "location_city": loc.get("city"),
             "detected_timezone": loc.get("detected_timezone"),
         })
-    log_event(logger, event="stage1.boot", stage="stage1", data=boot_data)
+    log_event(logger, event="stage2.boot", stage="stage2", data=boot_data)
     
     # --- Phase 2: Hardware Self-Test ---
     while True:
@@ -185,7 +179,7 @@ def run_stage1(cfg: Stage1Config) -> int:
         if results.code == 0:
             # 성공 시 대기 모드 진입 및 루프 탈출
             io.show_code(0)
-            log_event(logger, event="stage1.ready", stage="stage1")
+            log_event(logger, event="stage2.ready", stage="stage2")
             break
         else:
             # self-test 실패 시 에러 코드 표시
@@ -194,7 +188,7 @@ def run_stage1(cfg: Stage1Config) -> int:
 
             # 버튼 대기 후 재시작 (셀프테스트 루프 처음으로 이동)
             io.wait_for_button()
-            log_event(logger, event="stage1.boot.retry_requested", stage="stage1", data={"reason": "self_test_fail"})
+            log_event(logger, event="stage2.boot.retry_requested", stage="stage2", data={"reason": "self_test_fail"})
             continue
 
     # B) Self-test 성공 시 버튼 대기 루프
@@ -206,12 +200,20 @@ def run_stage1(cfg: Stage1Config) -> int:
 
             # 버튼이 눌렸을 때의 시퀀스
             logger.info(">>> 버튼 눌림 감지: 생산 시퀀스를 시작합니다.")
-            log_event(logger, event="stage1.sequence.start", stage="stage1")
+            log_event(logger, event="stage2.sequence.start", stage="stage2")
             
             # 전역 MLPE 상태 초기화 (이전 테스트 결과 보관 방지)
             g.target_device.reset()
 
-            from stage1.steps import run_stage_test
+            # ADC 설정 로드
+            try:
+                with open("configs/adc_values.json", "r") as f:
+                    adc_config = json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load adc_values.json: {e}")
+                adc_config = {}
+
+            from .steps import run_stage_test
 
             # 1단계 양산 시퀀스 실행
             results = run_stage_test(
@@ -220,8 +222,10 @@ def run_stage1(cfg: Stage1Config) -> int:
                 db_server=db_server,
                 vendor=cfg.vendor,
                 product=cfg.product,
-                stage_name="stage1",
-                adc_config=adc_config
+                stage_name="stage2",
+                adc_config=adc_config,
+                relay_pin=cfg.relay_pin,
+                relay_active_high=cfg.relay_active_high
             )
 
             # 서버 로그 전송 (성공/실패 상관없이 시퀀스 종료 시 한 번만)

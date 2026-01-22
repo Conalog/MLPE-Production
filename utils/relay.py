@@ -14,34 +14,34 @@ class RelayController:
             # 초기 상태(initial_value)는 꺼짐(False)으로 설정합니다.
             self.relay = OutputDevice(pin, active_high=active_high, initial_value=False)
             self.pin = pin
-            print(f"릴레이 초기화 완료: GPIO {pin} (Active High={active_high})")
+            # print(f"릴레이 초기화 완료: GPIO {pin} (Active High={active_high})")
         except Exception as e:
-            print(f"릴레이 초기화 실패: {e}")
+            # print(f"릴레이 초기화 실패: {e}")
             raise
 
     def on(self):
         """릴레이를 작동시킵니다 (접점 연결)"""
         if not self.relay.value:
             self.relay.on()
-            print("릴레이 ON")
+            # print("릴레이 ON")
 
     def off(self):
         """릴레이 작동을 멈춥니다 (접점 분리)"""
         if self.relay.value:
             self.relay.off()
-            print("릴레이 OFF")
+            # print("릴레이 OFF")
 
     def toggle(self):
         """릴레이 상태를 반전시킵니다"""
         self.relay.toggle()
-        print(f"릴레이 상태 반전 (현재: {'ON' if self.relay.value else 'OFF'})")
+        # print(f"릴레이 상태 반전 (현재: {'ON' if self.relay.value else 'OFF'})")
 
     def cleanup(self):
         """리소스 해제"""
         if hasattr(self, 'relay'):
             self.off() # 안전을 위해 끄고 종료
             self.relay.close()
-            print("릴레이 리소스 해제 완료.")
+            # print("릴레이 리소스 해제 완료.")
 
 # --- 테스트 실행부 ---
 if __name__ == "__main__":

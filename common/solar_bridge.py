@@ -9,301 +9,206 @@ from typing import Any, Optional
 class SolarBridgeClient:
     """
     Solar Bridge (Go MQTT Server)와 통신하기 위한 클라이언트.
-    각 메소드는 독립적인 연결(self-contained connection)을 사용하여 안정성을 보장합니다.
+    지속적인 연결(Persistent Connection)을 유지하여 통신 안정성을 확보합니다.
     """
-    def __init__(self, host: str = "localhost", port: int = 1883, timeout: float = 1.0):
+    def __init__(self, host: str = "localhost", port: int = 1883, timeout: float = 2.0):
         self.host = host
         self.port = port
         self.timeout = timeout
         self._client = mqtt.Client()
         self._client.on_message = self._on_message
+        self._client.on_connect = self._on_connect
+        self._client.on_subscribe = self._on_subscribe
         
         self._stick_list: list[dict[str, Any]] = []
-        self._neighbor_map: dict[str, list[dict[str, Any]]] = {} # stick_id -> neighbors
-        self._device_info_map: dict[str, dict[str, Any]] = {}   # device_id -> info
-        
-        # 로우 레벨 명령 결과를 위한 상태 저장
+        self._neighbor_map: dict[str, list[dict[str, Any]]] = {}
+        self._device_info_map: dict[str, dict[str, Any]] = {}
         self._cmd_results: dict[str, str] = {}
         self._responses: dict[str, Any] = {}
         self._mlpe_data: dict[str, Any] = {}
         self._adc_data: dict[str, list[dict[str, Any]]] = {}
+        self._clear_neighbors_results: dict[str, bool] = {}
         
         self._response_event = threading.Event()
         self._result_event = threading.Event()
+        self._connected_event = threading.Event()
+        self._subscribed_topics: set[str] = set()
+        self._subscribe_event = threading.Event()
+        self._target_subscribe_topic: Optional[str] = None
+
+    def start(self):
+        """MQTT 클라이언트를 시작하고 연결될 때까지 대기합니다."""
+        self._client.connect(self.host, self.port, keepalive=60)
+        self._client.loop_start()
+        if not self._connected_event.wait(timeout=self.timeout):
+            raise ConnectionError(f"Failed to connect to {self.host}:{self.port}")
+        
+        # 기본 브릿지 채널 구독
+        self._subscribe_sync(["solar/bridge/rx", "solar/device/+/result", "solar/feature/+/status"])
+
+    def stop(self):
+        """연결을 종료합니다."""
+        self._client.loop_stop()
+        self._client.disconnect()
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            self._connected_event.set()
+
+    def _on_subscribe(self, client, userdata, mid, granted_qos):
+        self._subscribe_event.set()
+
+    def _subscribe_sync(self, topics: list[str]):
+        """구독이 브로커에서 승인될 때까지 동기적으로 대기합니다."""
+        new_topics = [t for t in topics if t not in self._subscribed_topics]
+        if not new_topics:
+            return
+        
+        self._subscribe_event.clear()
+        for t in new_topics:
+            self._client.subscribe(t)
+            self._subscribed_topics.add(t)
+        
+        self._subscribe_event.wait(timeout=self.timeout)
+
+    def _normalize_id(self, device_id: str) -> str:
+        """ID를 일관된 형식(0x + 대문자)으로 정규화합니다."""
+        clean = device_id.upper()
+        if clean.startswith("0X"):
+            clean = clean[2:]
+        return f"0x{clean}"
 
     def _on_message(self, client, userdata, msg):
         try:
             topic = msg.topic
             data = json.loads(msg.payload.decode())
             
-            # 1. Bridge 관리 응답 (solar/bridge/rx)
+            # 1. Bridge 관리 응답
             if topic == "solar/bridge/rx":
+                parsed_data = data.get("parsed_data", {})
                 msg_type = data.get("type")
                 
-                # LIST_STICKS 응답
-                if msg_type == "STICK_LIST" or isinstance(data, list) or (isinstance(data, dict) and "sticks" in data):
-                    if isinstance(data, list):
-                        self._stick_list = data
-                    elif isinstance(data, dict):
-                        self._stick_list = data.get("sticks", [])
+                if msg_type == "STICK_LIST" or isinstance(data, list) or "sticks" in data:
+                    self._stick_list = data if isinstance(data, list) else data.get("sticks", [])
                     self._response_event.set()
-                
-                # GET_NEIGHBORS 응답 (Bridge API 버전)
-                parsed_data = data.get("parsed_data", {})
-                if parsed_data.get("cmd_name") == "RESP_GET_NEIGHBORS":
-                    stick_id = data.get("stick_id")
-                    res_payload = parsed_data.get("payload", {})
-                    neighbors = res_payload.get("neighbors", [])
-                    if stick_id:
-                        self._neighbor_map[stick_id] = neighbors
+                elif parsed_data.get("cmd_name") == "RESP_GET_NEIGHBORS":
+                    sid = data.get("stick_id")
+                    if sid: self._neighbor_map[sid] = parsed_data.get("payload", {}).get("neighbors", [])
+                    self._response_event.set()
+                elif parsed_data.get("cmd_name") == "RESP_CLEAR_NEIGHBORS":
+                    sid = data.get("stick_id")
+                    if sid: self._clear_neighbors_results[sid] = parsed_data.get("payload", {}).get("success", False)
                     self._response_event.set()
 
-            # 2. 로우 레벨 결과 알림 (solar/device/<UID>/result)
+            # 2. 로우 레벨 결과
             elif "/result" in topic:
                 cmd_name = data.get("command")
-                status = data.get("status")
                 if cmd_name:
-                    self._cmd_results[cmd_name] = status
+                    self._cmd_results[cmd_name] = data.get("status")
                     self._result_event.set()
 
-            # 3. 로우 레벨 데이터 응답 (RX)
+            # 3. 데이터 응답 (RX)
             elif "/rx" in topic:
                 parsed = data.get("parsed_data", {})
                 cmd_name = parsed.get("cmd_name")
-                
                 if cmd_name:
                     res_payload = parsed.get("payload", {})
-                    
-                    # Version Unpacking (VID, PID, etc)
                     if cmd_name in ["RESP_GET_INFO", "BEACON_RAW_DATA"]:
                         v_raw = res_payload.get("version", 0)
                         if v_raw:
-                            vid = (v_raw >> 28) & 0x0F
-                            pid = (v_raw >> 20) & 0x0F
-                            major = (v_raw >> 16) & 0x0F
-                            minor = (v_raw >> 8) & 0xFF
-                            patch = v_raw & 0xFF
-                            res_payload["vid"] = vid
-                            res_payload["pid"] = pid
-                            res_payload["version_unpacked"] = f"{major}.{minor}.{patch}"
-
+                            res_payload.update({
+                                "vid": (v_raw >> 28) & 0x0F, "pid": (v_raw >> 20) & 0x0F,
+                                "version_unpacked": f"{(v_raw >> 16) & 0x0F}.{(v_raw >> 8) & 0xFF}.{v_raw & 0xFF}"
+                            })
                     self._responses[cmd_name] = res_payload
-                    
-                    # ID 추출 (MLPE ID or L3 Source or Topic Fallback)
-                    target_id = data.get("mlpe_id")
-                    if not target_id:
-                        target_id = data.get("l3_header", {}).get("src")
-                    
-                    if not target_id and "mlpe/" in topic:
-                        # Topic: solar/mlpe/0x12345678/rx
-                        parts = topic.split("/")
-                        if len(parts) >= 3:
-                            target_id = parts[2]
-                    
-                    if target_id:
-                        self._mlpe_data[target_id.upper()] = res_payload
-                    
-                    if cmd_name.startswith("RESP_"):
-                        self._response_event.set()
+                    tid = self._normalize_id(data.get("mlpe_id") or data.get("l3_header", {}).get("src") or topic.split("/")[2])
+                    self._mlpe_data[tid] = res_payload
+                    if cmd_name.startswith("RESP_"): self._response_event.set()
                 
-            # 4. 고속 ADC 데이터 (solar/mlpe/<ID>/adc)
+            # 4. 고속 ADC 데이터
             elif "/adc" in topic:
-                # High-Level Feature: solar/mlpe/<ID>/adc
-                target_id = data.get("mlpe_id")
-                if not target_id:
-                    parts = topic.split("/")
-                    if len(parts) >= 3:
-                        target_id = parts[2]
-                
-                if target_id:
-                    target_id_upper = target_id.upper()
-                    if target_id_upper not in self._adc_data:
-                        self._adc_data[target_id_upper] = []
-                    self._adc_data[target_id_upper].append(data)
+                tid = self._normalize_id(data.get("mlpe_id") or topic.split("/")[2])
+                if tid not in self._adc_data: self._adc_data[tid] = []
+                self._adc_data[tid].append(data)
 
-            # 5. 스마트 기능 상태 (solar/feature/<UID>/status)
+            # 5. 스마트 기능 상태
             elif "/status" in topic:
-                # Smart Feature Status: solar/feature/<UID>/status
                 feature = data.get("feature")
-                status = data.get("status")
-                if feature:
-                    self._cmd_results[feature] = status
+                if feature: self._cmd_results[feature] = data.get("status")
 
-        except Exception:
-            pass
+        except Exception: pass
 
-    def list_sticks(self, logger: Optional[logging.Logger] = None) -> list[dict[str, Any]]:
-        """연결된 스틱 목록을 조회합니다 (Bridge API)."""
+    def list_sticks(self, logger=None) -> list:
         self._stick_list = []
         self._response_event.clear()
-
-        try:
-            self._client.connect(self.host, self.port, keepalive=60)
-            # Subscribe to bridge, device results, and MLPE responses
-            self._client.subscribe("solar/bridge/rx")
-            self._client.subscribe("solar/device/+/result")
-            self._client.subscribe("solar/mlpe/+/rx")
-            self._client.subscribe("solar/mlpe/+/adc")
-            self._client.subscribe("solar/feature/+/status")
-            self._client.loop_start()
-
-            self._client.publish("solar/bridge/tx", json.dumps({"type": "LIST_STICKS"}))
-
-            wait_ok = self._response_event.wait(timeout=self.timeout)
-            
-            self._client.loop_stop()
-            self._client.disconnect()
-
-            return self._stick_list if wait_ok else []
-        except Exception as e:
-            if logger: logger.error(f"list_sticks failed: {e}")
-            return []
+        self._client.publish("solar/bridge/tx", json.dumps({"type": "LIST_STICKS"}))
+        return self._stick_list if self._response_event.wait(timeout=self.timeout) else []
 
     def dump_adc(self, target_id: str, stick_uid: str, duration: float = 1.0, logger=None) -> list:
-        """
-        DUMP_RAW_ADC 하이레벨 기능을 사용하여 특정 장치의 ADC 데이터를 수집합니다.
-        """
-        target_id_upper = target_id.upper()
-        if target_id_upper.startswith("0X"):
-            target_id_clean = target_id_upper[2:]
-        else:
-            target_id_clean = target_id_upper
+        tid_fmt = self._normalize_id(target_id)
+        self._subscribe_sync([f"solar/mlpe/{tid_fmt}/adc"])
         
-        target_id_fmt = f"0x{target_id_clean}"
+        self._adc_data[tid_fmt] = []
+        self._cmd_results["DUMP_RAW_ADC"] = None
+        
+        self._client.publish(f"solar/feature/{stick_uid}/tx", json.dumps({
+            "command": "DUMP_RAW_ADC", "args": {"target_id": tid_fmt, "duration": duration}
+        }))
 
-        payload = {
-            "command": "DUMP_RAW_ADC",
-            "args": {
-                "target_id": target_id_fmt,
-                "duration": duration
-            }
-        }
-        topic = f"solar/feature/{stick_uid}/tx"
+        end_time = time.time() + duration + 1.2 # Safety margin
+        while time.time() < end_time:
+            if self._cmd_results.get("DUMP_RAW_ADC") == "SUCCESS":
+                if time.time() > (end_time - 1.0): break
+            if self._cmd_results.get("DUMP_RAW_ADC") == "FAILED": break
+            time.sleep(0.01)
 
-        self._client.connect(self.host, self.port, 60)
-        self._client.loop_start()
+        return self._adc_data.get(tid_fmt, [])
 
-        try:
-            # Subscribe to necessary topics
-            self._client.subscribe(f"solar/mlpe/{target_id_fmt}/adc")
-            self._client.subscribe(f"solar/feature/{stick_uid}/status")
-            
-            # 기존 데이터 클리어
-            self._adc_data[target_id_fmt.upper()] = []
-            self._cmd_results["DUMP_RAW_ADC"] = None
-
-            if logger: logger.info(f"Sending DUMP_RAW_ADC to {target_id_fmt} via {stick_uid} (duration={duration}s)")
-            self._client.publish(topic, json.dumps(payload))
-
-            # 데이터 수집 대기 (duration + 여유 시간)
-            end_time = time.time() + duration + 2.0
-            while time.time() < end_time:
-                # 상태가 SUCCESS로 변했거나 duration이 지났는지 확인
-                if self._cmd_results.get("DUMP_RAW_ADC") == "SUCCESS":
-                    # SUCCESS가 오더라도 데이터 패킷이 다 올 때까지 조금 더 기다림
-                    if time.time() > (end_time - 1.0):
-                        break
-                
-                if self._cmd_results.get("DUMP_RAW_ADC") == "FAILED":
-                    if logger: logger.error(f"DUMP_RAW_ADC failed for {target_id_fmt}")
-                    break
-                    
-                time.sleep(0.1)
-
-            data_count = len(self._adc_data.get(target_id_fmt.upper(), []))
-            if logger: logger.info(f"DUMP_RAW_ADC finished. Collected {data_count} samples.")
-            
-            return self._adc_data.get(target_id_fmt.upper(), [])
-
-        finally:
-            self._client.loop_stop()
-            self._client.disconnect()
-
-    def get_neighbors(self, stick_id: str, logger: Optional[logging.Logger] = None) -> list[dict[str, Any]]:
-        """주변 노드 검색 (Low-Level Device API 사용 버전)"""
-        # 이웃 검색은 Stick(ID: 0)에게 요청하는 로우 레벨 명령으로 수행
+    def get_neighbors(self, stick_id: str, logger=None) -> list:
         res = self._run_command(stick_id, "0", "REQ_GET_NEIGHBORS", {}, logger=logger)
-        if res:
-            return res.get("neighbors", [])
-        return []
+        return res.get("neighbors", []) if res else []
 
-    def get_device_info(self, target_id: str, stick_id: str, logger: Optional[logging.Logger] = None) -> Optional[dict[str, Any]]:
-        """장치 정보 조회 (Low-Level Device API)"""
+    def clear_neighbors(self, stick_id: str, logger=None) -> bool:
+        self._response_event.clear()
+        self._client.publish("solar/bridge/tx", json.dumps({"type": "CLEAR_NEIGHBORS", "stick_id": stick_id}))
+        return self._clear_neighbors_results.get(stick_id, False) if self._response_event.wait(timeout=self.timeout) else False
+
+    def get_device_info(self, target_id: str, stick_id: str, logger=None) -> Optional[dict]:
         return self._run_command(stick_id, target_id, "REQ_GET_INFO", {}, logger=logger)
 
-    def req_shutdown(self, target_id: str, stick_uid: str, rsd1: bool = True, rsd2: bool = True, logger: Optional[logging.Logger] = None) -> Optional[dict[str, Any]]:
-        """REQ_SHUTDOWN 명령 전송 (Low-Level Device API)"""
-        args = {
-            "target_id": target_id,
-            "route": 2,
-            "rsd1": rsd1,
-            "rsd2": rsd2,
-            "group_num1": 0xFFFFFFFF  # 4294967295, 고정값 요구사항 반영
-        }
+    def req_shutdown(self, target_id: str, stick_uid: str, rsd1=True, rsd2=True, logger=None) -> Optional[dict]:
+        args = {"target_id": target_id, "route": 2, "rsd1": rsd1, "rsd2": rsd2, "group_num1": 0xFFFFFFFF}
         return self._run_command(stick_uid, target_id, "REQ_SHUTDOWN", args, logger=logger)
 
-    def _run_command(self, stick_uid: str, target_id: str, cmd_name: str, args: dict, logger: Optional[logging.Logger] = None) -> Optional[dict[str, Any]]:
-        """Low-Level Device API 실행 로직 (self-contained connection)"""
-        target_id_upper = target_id.upper()
+    def _run_command(self, stick_uid: str, target_id: str, cmd_name: str, args: dict, logger=None) -> Optional[dict]:
+        tid_norm = self._normalize_id(target_id)
         resp_name = cmd_name.replace("REQ_", "RESP_")
         
+        self._subscribe_sync([f"solar/device/{stick_uid}/rx", f"solar/mlpe/{tid_norm}/rx"])
         self._cmd_results[cmd_name] = None
-        if resp_name in self._responses:
-            del self._responses[resp_name]
+        self._responses.pop(resp_name, None)
+        self._mlpe_data.pop(tid_norm, None)
         
-        try:
-            self._client.connect(self.host, self.port, keepalive=60)
-            
-            # 구독
-            self._client.subscribe(f"solar/device/{stick_uid}/rx")
-            self._client.subscribe(f"solar/device/{stick_uid}/result")
-            if target_id != "0":
-                self._client.subscribe(f"solar/mlpe/{target_id}/rx")
-            
-            self._client.loop_start()
+        args["target_id"] = target_id
+        if "route" not in args: args["route"] = 2 if target_id not in ["0", "0xFFFFFFFF"] else 1
+        
+        self._client.publish(f"solar/device/{stick_uid}/tx", json.dumps({"command": cmd_name, "args": args}))
 
-            # 명령 구성
-            args["target_id"] = target_id
-            if "route" not in args:
-                args["route"] = 2 if target_id not in ["0", "0xFFFFFFFF"] else 1
-            
-            payload = {"command": cmd_name, "args": args}
-            
-            if logger:
-                logger.info(f"Sending Low-Level cmd: {cmd_name} to {target_id} via {stick_uid}")
-            
-            self._client.publish(f"solar/device/{stick_uid}/tx", json.dumps(payload))
-
-            # 대기
-            result_data = None
-            end_time = time.time() + self.timeout
-            while time.time() < end_time:
-                # 1. 실제 데이터 패킷 확인 (가장 확실함)
-                if "GET" in cmd_name:
-                    if resp_name in self._responses:
-                        result_data = self._responses[resp_name]
-                        break
-                    if target_id != "0" and target_id_upper in self._mlpe_data:
-                        result_data = self._mlpe_data[target_id_upper]
-                        break
-                
-                # 2. 브릿지 ACK 확인
-                if self._cmd_results.get(cmd_name) == "SUCCESS":
-                    if "GET" not in cmd_name:
-                        result_data = {"status": "SUCCESS"}
-                        break
-                
-                # 오류 응답 확인
-                if self._cmd_results.get(cmd_name) and self._cmd_results.get(cmd_name) != "SUCCESS":
-                    if logger: logger.warning(f"Cmd {cmd_name} failed: {self._cmd_results.get(cmd_name)}")
+        result_data = None
+        end_time = time.time() + self.timeout
+        while time.time() < end_time:
+            if "GET" in cmd_name:
+                if resp_name in self._responses:
+                    result_data = self._responses[resp_name]
                     break
-                
-                time.sleep(0.1)
-
-            self._client.loop_stop()
-            self._client.disconnect()
-            
-            return result_data
-        except Exception as e:
-            if logger: logger.error(f"Command {cmd_name} failed: {e}")
-            return None
+                if tid_norm in self._mlpe_data:
+                    result_data = self._mlpe_data[tid_norm]
+                    break
+            if self._cmd_results.get(cmd_name) == "SUCCESS":
+                if "GET" not in cmd_name:
+                    result_data = {"status": "SUCCESS"}
+                    break
+            if self._cmd_results.get(cmd_name) and self._cmd_results.get(cmd_name) != "SUCCESS": break
+            time.sleep(0.05)
+        
+        return result_data
