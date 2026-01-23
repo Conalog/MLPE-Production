@@ -31,6 +31,7 @@ E_FIRMWARE_DOWNLOAD_FAIL = ErrorCode(104, "FIRMWARE_DOWNLOAD_FAIL", "펌웨어 �
 E_FIRMWARE_UPLOAD_FAIL = ErrorCode(105, "FIRMWARE_UPLOAD_FAIL", "펌웨어 업로드 실패")
 E_DEVICE_COMMUNICATION_FAIL = ErrorCode(106, "DEVICE_COMMUNICATION_FAIL", "장비 통신 테스트 실패")
 E_ADC_VERIFICATION_FAIL = ErrorCode(107, "ADC_VERIFICATION_FAIL", "장비 전압(ADC) 검증 실패")
+E_MESH_CONFIG_FAIL = ErrorCode(108, "MESH_CONFIG_FAIL", "메쉬 설정 변경 실패")
 
 # Step2 sequence placeholders (2단계 관련: 200-299)
 E_INPUT_POWER_CHECK_NOT_IMPLEMENTED = ErrorCode(201, "INPUT_POWER_NI", "입력 전원 확인 미구현")

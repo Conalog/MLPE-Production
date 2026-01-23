@@ -185,7 +185,10 @@ class RSDController(TestCase):
             return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": "Device ID or Stick UID missing"}
 
         try:
-            g.bridge.req_shutdown(device_id, uid, rsd1=rsd1, rsd2=rsd2)
+            res = g.bridge.req_shutdown(device_id, uid, rsd1=rsd1, rsd2=rsd2)
+            if res is None:
+                return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"RSD control timeout: No response from {device_id}"}
+            
             time.sleep(0.1) # wait for settlement
             log_msg = f"RSD Set: RSD1={rsd1}, RSD2={rsd2}"
             return {"code": 0, "log": log_msg}

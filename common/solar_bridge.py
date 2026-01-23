@@ -81,7 +81,12 @@ class SolarBridgeClient:
     def _on_message(self, client, userdata, msg):
         try:
             topic = msg.topic
-            data = json.loads(msg.payload.decode())
+            payload_str = msg.payload.decode()
+            data = json.loads(payload_str)
+            
+            # Debug log for all incoming bridge messages
+            if "solar/bridge" in topic:
+                logging.info(f"[MQTT] RX Topic: {topic}, Payload: {payload_str[:200]}")
             
             # 1. Bridge 관리 응답
             if topic == "solar/bridge/rx":
@@ -120,9 +125,16 @@ class SolarBridgeClient:
                                 "vid": (v_raw >> 28) & 0x0F, "pid": (v_raw >> 20) & 0x0F,
                                 "version_unpacked": f"{(v_raw >> 16) & 0x0F}.{(v_raw >> 8) & 0xFF}.{v_raw & 0xFF}"
                             })
-                    self._responses[cmd_name] = res_payload
                     tid = self._normalize_id(data.get("mlpe_id") or data.get("l3_header", {}).get("src") or topic.split("/")[2])
-                    self._mlpe_data[tid] = res_payload
+                    
+                    # 모든 /rx 데이터는 mlpe_data에 저장 (ID별로 관리)
+                    if tid not in self._mlpe_data:
+                        self._mlpe_data[tid] = {}
+                    
+                    self._mlpe_data[tid][cmd_name] = res_payload
+                    
+                    # 하위 호환성 유지: 마지막 시스템 응답으로도 저장
+                    self._responses[cmd_name] = res_payload
                     if cmd_name.startswith("RESP_"): self._response_event.set()
                 
             # 4. 고속 ADC 데이터
@@ -141,28 +153,46 @@ class SolarBridgeClient:
     def list_sticks(self, logger=None) -> list:
         self._stick_list = []
         self._response_event.clear()
+        
         self._client.publish("solar/bridge/tx", json.dumps({"type": "LIST_STICKS"}))
-        return self._stick_list if self._response_event.wait(timeout=self.timeout) else []
+        
+        if self._response_event.wait(timeout=self.timeout):
+            return self._stick_list
+        else:
+            if logger:
+                logger.warning("Timeout waiting for STICK_LIST response")
+            return []
 
     def dump_adc(self, target_id: str, stick_uid: str, duration: float = 1.0, logger=None) -> list:
         tid_fmt = self._normalize_id(target_id)
         self._subscribe_sync([f"solar/mlpe/{tid_fmt}/adc"])
         
-        self._adc_data[tid_fmt] = []
-        self._cmd_results["DUMP_RAW_ADC"] = None
+        for attempt in range(1, 3):
+            if logger and attempt > 1:
+                logger.debug(f"[SolarBridge] Retrying DUMP_RAW_ADC for {tid_fmt} (Attempt {attempt}/2)")
+
+            self._adc_data[tid_fmt] = []
+            self._cmd_results["DUMP_RAW_ADC"] = None
+            
+            self._client.publish(f"solar/feature/{stick_uid}/tx", json.dumps({
+                "command": "DUMP_RAW_ADC", "args": {"target_id": tid_fmt, "duration": duration}
+            }))
+
+            # Wait for the full duration plus margin
+            end_time = time.time() + duration + 1.2
+            while time.time() < end_time:
+                # If command definitively failed on the stick side, retry early
+                if self._cmd_results.get("DUMP_RAW_ADC") == "FAILED":
+                    break
+                time.sleep(0.1)
+            
+            samples = self._adc_data.get(tid_fmt, [])
+            if samples:
+                return samples
         
-        self._client.publish(f"solar/feature/{stick_uid}/tx", json.dumps({
-            "command": "DUMP_RAW_ADC", "args": {"target_id": tid_fmt, "duration": duration}
-        }))
-
-        end_time = time.time() + duration + 1.2 # Safety margin
-        while time.time() < end_time:
-            if self._cmd_results.get("DUMP_RAW_ADC") == "SUCCESS":
-                if time.time() > (end_time - 1.0): break
-            if self._cmd_results.get("DUMP_RAW_ADC") == "FAILED": break
-            time.sleep(0.01)
-
-        return self._adc_data.get(tid_fmt, [])
+        if logger:
+            logger.warning(f"[SolarBridge] Failed to collect any ADC samples for {tid_fmt} after 2 attempts.")
+        return []
 
     def get_neighbors(self, stick_id: str, logger=None) -> list:
         res = self._run_command(stick_id, "0", "REQ_GET_NEIGHBORS", {}, logger=logger)
@@ -180,6 +210,15 @@ class SolarBridgeClient:
         args = {"target_id": target_id, "route": 2, "rsd1": rsd1, "rsd2": rsd2, "group_num1": 0xFFFFFFFF}
         return self._run_command(stick_uid, target_id, "REQ_SHUTDOWN", args, logger=logger)
 
+    def set_mesh_config(self, target_id: str, stick_uid: str, logger=None) -> Optional[dict]:
+        """메쉬 설정을 변경합니다. (Channel 39, ASP 200ms, Group 0xFF)"""
+        args = {
+            "l1": {"channel": 39},
+            "l2": {"asp_interval": 200},
+            "l3": {"mesh_group_id": 0xff, "relay_option": 0, "relay_ratio": 100}
+        }
+        return self._run_command(stick_uid, target_id, "REQ_SET_MESH_CONFIG", args, logger=logger)
+
     def _run_command(self, stick_uid: str, target_id: str, cmd_name: str, args: dict, logger=None) -> Optional[dict]:
         tid_norm = self._normalize_id(target_id)
         resp_name = cmd_name.replace("REQ_", "RESP_")
@@ -191,24 +230,57 @@ class SolarBridgeClient:
         
         args["target_id"] = target_id
         if "route" not in args: args["route"] = 2 if target_id not in ["0", "0xFFFFFFFF"] else 1
+        is_broadcast = target_id in ["0", "0xFFFFFFFF", "0xffffffff"]
         
-        self._client.publish(f"solar/device/{stick_uid}/tx", json.dumps({"command": cmd_name, "args": args}))
+        max_attempts = 3
+        attempt_timeout = 0.5
+        
+        for attempt in range(1, max_attempts + 1):
+            if logger and attempt > 1:
+                logger.debug(f"[SolarBridge] Retry {cmd_name} for {target_id} (Attempt {attempt}/{max_attempts})")
 
-        result_data = None
-        end_time = time.time() + self.timeout
-        while time.time() < end_time:
-            if "GET" in cmd_name:
+            self._cmd_results[cmd_name] = None
+            self._responses.pop(resp_name, None)
+            if tid_norm in self._mlpe_data:
+                self._mlpe_data[tid_norm].pop(resp_name, None)
+            
+            self._client.publish(f"solar/device/{stick_uid}/tx", json.dumps({"command": cmd_name, "args": args}))
+
+            result_data = None
+            end_time = time.time() + attempt_timeout
+            
+            while time.time() < end_time:
+                # 1. 대상 장치(tid_norm)의 특정 응답(resp_name) 확인
+                if tid_norm in self._mlpe_data and resp_name in self._mlpe_data[tid_norm]:
+                    result_data = self._mlpe_data[tid_norm][resp_name]
+                    break
+                
+                # 2. 하위 호환성 확인
                 if resp_name in self._responses:
                     result_data = self._responses[resp_name]
                     break
-                if tid_norm in self._mlpe_data:
-                    result_data = self._mlpe_data[tid_norm]
-                    break
-            if self._cmd_results.get(cmd_name) == "SUCCESS":
-                if "GET" not in cmd_name:
+
+                # 3. 스틱의 전송 결과 확인
+                stick_status = self._cmd_results.get(cmd_name)
+                if stick_status == "SUCCESS":
+                    if is_broadcast and "GET" not in cmd_name:
+                        result_data = {"status": "SUCCESS"}
+                        break
+                elif stick_status and stick_status != "SUCCESS":
+                    break # 이 시도 중지하고 다음 시도로
+
+                time.sleep(0.05)
+            
+            # 최종 결과 판정 (개별 시도 종료 후)
+            if result_data is None and self._cmd_results.get(cmd_name) == "SUCCESS":
+                # 응답이 필수적이지 않은 일반 명령(SET 등)이면 성공으로 인정
+                if not (is_broadcast or ("GET" in cmd_name or cmd_name in ["REQ_SHUTDOWN", "REQ_SET_MESH_CONFIG", "REQ_SET_GROUP"])):
                     result_data = {"status": "SUCCESS"}
-                    break
-            if self._cmd_results.get(cmd_name) and self._cmd_results.get(cmd_name) != "SUCCESS": break
-            time.sleep(0.05)
-        
-        return result_data
+            
+            if result_data is not None:
+                return result_data
+
+        if logger:
+            logger.warning(f"[SolarBridge] {cmd_name} failed after {max_attempts} attempts to {target_id}.")
+            
+        return None

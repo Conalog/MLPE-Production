@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import logging
 import json
+import signal
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,22 +39,45 @@ class Stage1Config:
     jig_id: str
     vendor: str
     product: str
+    stage: int = 1
     timezone: str = "Asia/Seoul"
     adc_scales: list[float] = field(default_factory=lambda: [6.0, 2.0, 1.0, 1.0])
     server_config: dict[str, Any] = field(default_factory=dict)
 
+    def update_from_jig_config(self, jig_cfg: Any) -> None:
+        """Update mutable fields from a JigConfig object."""
+        # dataclass(frozen=True)이므로 __dict__를 통해 강제 업데이트하거나 
+        # 새 객체를 만들어야 함. 여기서는 편의상 필드별로 업데이트 (frozen=True 주의)
+        object.__setattr__(self, 'vendor', jig_cfg.vendor)
+        object.__setattr__(self, 'product', jig_cfg.product)
+        object.__setattr__(self, 'timezone', jig_cfg.timezone)
+        object.__setattr__(self, 'adc_scales', jig_cfg.adc_scales)
+
     @classmethod
     def from_json(cls, jig_config_path: str, io_config_path: str, server_config_path: str, logs_base_dir: str) -> Stage1Config:
-        from common.config_utils import load_json, parse_jig_config, parse_stage1_pins
+        from common.config_utils import load_json, parse_jig_config, parse_stage1_pins, get_hostname_jig_id
 
-        jig_cfg = parse_jig_config(load_json(jig_config_path))
+        # Hostname 기반 ID 생성 (Source of Truth)
+        jig_id = get_hostname_jig_id()
+        
+        jig_cfg_raw = load_json(jig_config_path)
+        # 파일의 ID와 hostname ID가 다르면 hostname ID로 강제 고정 및 파일 업데이트
+        if jig_cfg_raw.get("jig_id") != jig_id:
+            from common.config_utils import atomic_save_json
+            jig_cfg_raw["jig_id"] = jig_id
+            try:
+                atomic_save_json(jig_config_path, jig_cfg_raw)
+            except Exception:
+                pass
+            
+        jig_cfg = parse_jig_config(jig_cfg_raw)
         io_pins = parse_stage1_pins(load_json(io_config_path))
         server_cfg = load_json(server_config_path)
 
         return cls(
             jig_config_path=jig_config_path,
             io_config_path=io_config_path,
-                server_config_path=server_config_path,
+            server_config_path=server_config_path,
             tm1637_dio=io_pins.tm1637_dio,
             tm1637_clk=io_pins.tm1637_clk,
             relay_pin=io_pins.relay_pin,
@@ -78,6 +102,15 @@ def run_stage1(cfg: Stage1Config) -> int:
     # 1) Logger 생성
     log_dir = ensure_log_dir(cfg.logs_base_dir, "stage1")
     logger = build_logger(name="stage1", log_dir=log_dir, console=True, level=logging.INFO)
+
+    # --- Signal Handling for Graceful Shutdown ---
+    stop_requested = False
+    def sigterm_handler(signum, frame):
+        nonlocal stop_requested
+        logger.info("SIGTERM received. Will exit gracefully after current sequence.")
+        stop_requested = True
+    
+    signal.signal(signal.SIGTERM, sigterm_handler)
 
     # 2) db 서버 초기화
     from common.db_server import create_db_server
@@ -199,15 +232,36 @@ def run_stage1(cfg: Stage1Config) -> int:
 
     # B) Self-test 성공 시 버튼 대기 루프
     try:
-        while True:
-            logger.info(">>> 대기 중: 테스트 버튼을 누르면 시작합니다...")
-            io.wait_for_button()
+        waiting_message_shown = False
+        while not stop_requested:
+            if not waiting_message_shown:
+                logger.info(">>> 대기 중: 테스트 버튼을 누르면 시작합니다...")
+                waiting_message_shown = True
+
+            if not io.wait_for_button(timeout=1.0):
+                continue
+                
+            waiting_message_shown = False # 버튼 클릭 시 다음 대기를 위해 초기화
             io.set_loading(led_color="green")
 
             # 버튼이 눌렸을 때의 시퀀스
             logger.info(">>> 버튼 눌림 감지: 생산 시퀀스를 시작합니다.")
-            log_event(logger, event="stage1.sequence.start", stage="stage1")
             
+            # --- Local Config Refresh ---
+            # 수퍼바이저가 배경에서 jig.json을 동기화하므로, 
+            # 버튼 눌림 시점에 파일에서 최신 정보를 읽어 메모리에 반영합니다.
+            try:
+                from common.config_utils import load_json, parse_jig_config
+                latest_data = load_json(cfg.jig_config_path)
+                new_jig_cfg = parse_jig_config(latest_data)
+                cfg.update_from_jig_config(new_jig_cfg)
+                io.adc_scales = cfg.adc_scales
+                logger.debug(f"Local config refreshed: {cfg.vendor}/{cfg.product}")
+            except Exception as e:
+                logger.error(f"Failed to refresh local config: {e}")
+
+            log_event(logger, event="stage1.sequence.start", stage="stage1")
+
             # 전역 MLPE 상태 초기화 (이전 테스트 결과 보관 방지)
             g.target_device.reset()
 

@@ -15,11 +15,10 @@ class Button:
             print(f"버튼 초기화 실패 (GPIO {pin}): {e}")
             raise
 
-    def wait_until_push(self):
-        """버튼이 눌릴 때(High가 될 때)까지 대기"""
-        print(f"버튼 대기 중 (현재 Low 상태 정상, BCM {self.pin})...")
-        self.device.wait_for_press()
-        # time.sleep(0.01)
+    def wait_until_push(self, timeout: float | None = None) -> bool:
+        """버튼이 눌릴 때(High가 될 때)까지 대기. timeout 발생 시 False 반환."""
+        # print(f"버튼 대기 중 (현재 Low 상태 정상, BCM {self.pin})...")
+        return self.device.wait_for_press(timeout=timeout)
 
     def is_pressed(self) -> bool:
         return self.device.is_pressed

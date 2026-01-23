@@ -24,6 +24,11 @@ class DBServer(abc.ABC):
         """Vendor, Product, Type에 맞는 펌웨어를 다운로드하고 (바이너리, 버전) 튜플을 반환합니다."""
         pass
 
+    @abc.abstractmethod
+    def get_jig_config(self, jig_id: str, logger: logging.Logger | None = None) -> dict[str, Any] | None:
+        """jig_id에 해당하는 설정을 서버에서 가져옵니다."""
+        pass
+
 class TestDBServer(DBServer):
     """PocketBase 기반 테스트 서버 구현"""
     def __init__(self, url: str, collection: str, factory_id: str):
@@ -35,14 +40,10 @@ class TestDBServer(DBServer):
     def push_log(self, data: dict[str, Any], logger: logging.Logger | None = None) -> bool:
         endpoint = f"{self.url}/api/collections/{self.collection}/records"
 
-        # PocketBase 스키마에 맞게 변환
-        # factory: RELATION_RECORD_ID
-        # jig: string (지그 ID)
-        # log: JSON object
+        # PocketBase 스키마와의 충돌(Relation 필드 유효성 검사)을 피하기 위해
+        # 확실한 필드들만 포함하여 전송합니다.
         payload = {
-            "factory": self.factory_id,
             "jig": self.factory_id,
-            "jig_id": self.factory_id, # 대비용 필드 추가
             "log": data
         }
 
@@ -54,6 +55,10 @@ class TestDBServer(DBServer):
                 if logger:
                     log_event(logger, event="db.push.fail", level=logging.WARNING, 
                               data={"server": "test", "status": response.status_code, "error": error_info})
+                
+                # 사용자가 화면에서 바로 볼 수 있도록 콘솔에 상세 에러 출력
+                print(f"\n[DB_PUSH_ERROR] Status: {response.status_code}")
+                print(f"[DB_PUSH_ERROR] Detail: {json.dumps(error_info, indent=2, ensure_ascii=False)}\n")
                 return False
                 
             if logger:
@@ -142,6 +147,48 @@ class TestDBServer(DBServer):
                           data={"error": str(e)})
             return None
 
+    def get_jig_config(self, jig_id: str, logger: logging.Logger | None = None) -> dict[str, Any] | None:
+        """factory_config 컬렉션에서 설정을 조회합니다."""
+        try:
+            # 사용자가 확인해준 필드명 'jig'를 사용하여 조회합니다.
+            record = self.pb.collection('factory_config').get_first_list_item(f'jig = "{jig_id}"')
+            
+            if record:
+                # 'config'라는 이름의 JSON 필드가 있는지 확인
+                # 사용자 제보: "그 내부에 config데이터가 전부 다 있다고"
+                c_field = getattr(record, "config", {})
+                if isinstance(c_field, str): # 가끔 문자열로 올 경우 대비
+                    try:
+                        c_field = json.loads(c_field)
+                    except:
+                        c_field = {}
+
+                def get_val(key, default):
+                    # 1. config 필드 내부에서 먼저 찾음
+                    if isinstance(c_field, dict) and key in c_field:
+                        return c_field[key]
+                    # 2. 없으면 레코드 속성(Top-level)에서 찾음
+                    return getattr(record, key, default)
+
+                data = {
+                    "jig_id": getattr(record, "jig", jig_id),
+                    "vendor": get_val("vendor", ""),
+                    "product": get_val("product", ""),
+                    "stage": int(get_val("stage", 1)),
+                    "timezone": get_val("timezone", "Asia/Seoul"),
+                    "adc_scales": get_val("adc_scales", [6.0, 2.0, 1.0, 1.0]),
+                }
+                return data
+            return None
+        except Exception as e:
+            if logger:
+                log_event(logger, event="db.get_jig_config.fail", level=logging.WARNING, data={"jig_id": jig_id, "error": str(e)})
+            
+            # 사용자가 화면에서 바로 볼 수 있도록 콘솔에 상세 에러 출력
+            print(f"\n[DB_CONFIG_ERROR] Failed to fetch config for jig_id: {jig_id}")
+            print(f"[DB_CONFIG_ERROR] Detail: {e}\n")
+            return None
+
 class RealDBServer(DBServer):
     """실제 운영 서버 구현 (현재는 자리표시자)"""
     def __init__(self, url: str, api_key: str):
@@ -163,6 +210,9 @@ class RealDBServer(DBServer):
                       data={"vendor": vendor, "product": product, "type": fw_type})
         prefix = b"BOOT_" if fw_type == "bootloader" else b"APP_"
         return prefix + b"\x00\x01\x02\x03_REAL_FIRMWARE_PLACEHOLDER", "1.0.0-real"
+
+    def get_jig_config(self, jig_id: str, logger: logging.Logger | None = None) -> dict[str, Any] | None:
+        return None
 
 def create_db_server(config: dict[str, Any], jig_id: str) -> DBServer | None:
     """설정에 따라 적절한 DBServer 객체를 생성합니다."""

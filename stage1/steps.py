@@ -18,7 +18,8 @@ from common.error_codes import (
     E_FIRMWARE_DOWNLOAD_FAIL,
     E_FIRMWARE_UPLOAD_FAIL,
     E_DEVICE_COMMUNICATION_FAIL,
-    E_ADC_VERIFICATION_FAIL
+    E_ADC_VERIFICATION_FAIL,
+    E_MESH_CONFIG_FAIL
 )
 
 
@@ -126,7 +127,7 @@ class FirmwareUploader(TestCase):
         
         try:
             # Erase
-            subprocess.run(["probe-rs", "erase", "--chip", "nRF52810_xxAA"], check=True, timeout=20.0, capture_output=True)
+            subprocess.run(["probe-rs", "erase", "--chip", "nRF52810_xxAA", "--speed", "2000"], check=True, timeout=20.0, capture_output=True)
             
             # Flash App 1, App 2, Boot
             commands = [ (app_path, "0x4000", "app"), (app_path, "0x21000", "app"), (boot_path, "0x0", "bootloader") ]
@@ -134,6 +135,7 @@ class FirmwareUploader(TestCase):
             for path, addr, name in commands:
                 subprocess.run([
                     "probe-rs", "download", path, "--chip", "nRF52810_xxAA", 
+                    "--speed", "2000",
                     "--binary-format", "bin", "--base-address", addr
                 ], check=True, timeout=30.0, capture_output=True)
                 logs.append(f"Flash successful: {name} binary at {addr}")
@@ -183,7 +185,10 @@ class RSDController(TestCase):
             return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": "Device ID or Stick UID missing"}
 
         try:
-            g.bridge.req_shutdown(device_id, uid, rsd1=rsd1, rsd2=rsd2)
+            res = g.bridge.req_shutdown(device_id, uid, rsd1=rsd1, rsd2=rsd2)
+            if res is None:
+                return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"RSD control timeout: No response from {device_id}"}
+            
             time.sleep(0.1) # wait for settlement
             log_msg = f"RSD Set: RSD1={rsd1}, RSD2={rsd2}"
             return {"code": 0, "log": log_msg}
@@ -249,6 +254,23 @@ class ADCResultChecker(TestCase):
             return {"code": 0, "log": f"PASSED ({check_type}): {res_log}"}
 
 
+class MeshConfigurator(TestCase):
+    def run(self, args: dict[str, Any]) -> dict[str, Any]:
+        target_id = g.target_device.device_id
+        stick_uid = args.get("stick_uid")
+
+        if not target_id:
+            return {"code": E_MESH_CONFIG_FAIL.code, "log": "Device ID (Target ID) not found."}
+        if not stick_uid:
+            return {"code": E_MESH_CONFIG_FAIL.code, "log": "Stick UID not found in context. Comm Tester must run first."}
+
+        resp = g.bridge.set_mesh_config(target_id, stick_uid, logger=args.get("logger"))
+        if resp is None:
+            return {"code": E_MESH_CONFIG_FAIL.code, "log": f"Mesh config timeout: No response from {target_id}"}
+            
+        return {"code": 0, "log": f"Mesh config updated for {target_id}"}
+
+
 def run_stage_test(
     *,
     logger,
@@ -274,6 +296,7 @@ def run_stage_test(
         ("RSD1+2 ON", RSDController()),
         ("ADC (RSD1_2)", ADCResultChecker()),
         ("RSD All OFF", RSDController()),
+        ("Mesh Configurator", MeshConfigurator()),
     ]
     
     context = {
@@ -311,6 +334,11 @@ def run_stage_test(
         else:
             for line in res["log"].splitlines():
                 logger.info(f"  --> [OK] {line}")
+            
+            # Comm Tester 이후 3초간 대기 (장치 안정화용)
+            if name == "Comm Tester":
+                logger.info("Comm Tester OK. Waiting 3s for stabilization...")
+                time.sleep(3.0)
             
         time.sleep(0.1)
 

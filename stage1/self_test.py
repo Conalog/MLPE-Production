@@ -82,7 +82,7 @@ class StickChecker(TestCase):
         if not g.bridge:
             return {"code": E_STICK_NOT_FOUND.code, "log": "Solar Bridge client not initialized"}
         try:
-            sticks = g.bridge.list_sticks()
+            sticks = g.bridge.list_sticks(logger=args.get("logger"))
             if sticks:
                 version = sticks[0].get("version", "unknown")
                 return {"code": 0, "log": f"Stick is connected. Version : {version}"}
@@ -117,6 +117,7 @@ def run_self_test(
         "jig_id": jig_id,
         "config_path": config_path,
         "expected_jig_id": jig_id,
+        "logger": logger,
     }
 
     final_code = 0

@@ -107,18 +107,18 @@ class IOThread:
             self._state.mode = "idle"
             self._state.led_color = "off"
 
-    def wait_for_button(self) -> None:
-        """버튼이 눌릴 때까지 블로킹 대기 (best-effort)"""
+    def wait_for_button(self, timeout: float | None = None) -> bool:
+        """버튼이 눌릴 때까지 대기. timeout 발생 시 False 반환."""
         if self._btn is not None:
             try:
-                self._btn.wait_until_push()
+                return self._btn.wait_until_push(timeout=timeout)
             except Exception as e:
                 log_event(self._logger, event="io_thread.button.wait_fail", stage="stage1", data={"error": str(e)})
-                time.sleep(1.0)  # 에러 시 무한 루프 방지용 대기
+                time.sleep(1.0)
+                return False
         else:
-            # 버튼이 없으면 진행할 수 없으므로 잠시 대기 후 리턴하거나 예외를 던질 수 있음
-            # 여기서는 운영 편의상 잠시 대기
-            time.sleep(1.0)
+            time.sleep(timeout if timeout else 1.0)
+            return False
 
     def _init_devices_best_effort(self) -> None:
         # TM1637
