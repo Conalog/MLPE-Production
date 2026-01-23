@@ -2,59 +2,208 @@
   "stage1": {
     "guard_2_1": {
       "baseline": {
-        "vin1": {"min": 0, "max": 65536},
-        "vin2": {"min": 0, "max": 65536},
-        "vout": {"min": 0, "max": 65536}
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
       },
       "rsd1": {
-        "vin1": {"min": 0, "max": 65536},
-        "vin2": {"min": 0, "max": 65536},
-        "vout": {"min": 0, "max": 65536}
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
       },
       "rsd1_2": {
-        "vin1": {"min": 0, "max": 65536},
-        "vin2": {"min": 0, "max": 65536},
-        "vout": {"min": 0, "max": 65536}
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      }
+    },
+    "booster_2_1": {
+      "baseline": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "rsd1": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "rsd1_2": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      }
+    },
+    "booster_1_1": {
+      "baseline": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "rsd2": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      }
+    },
+    "guard_1_1": {
+      "baseline": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "rsd2": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
       }
     }
   },
   "stage2": {
     "guard_2_1": {
       "before_relay": {
-        "vin1": {"min": 0, "max": 65536},
-        "vin2": {"min": 0, "max": 65536},
-        "vout": {"min": 0, "max": 65536}
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
       },
       "after_relay": {
-        "vin1": {"min": 0, "max": 65536},
-        "vin2": {"min": 0, "max": 65536},
-        "vout": {"min": 0, "max": 65536},
-        "iout": {"min": 0, "max": 65536}
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 },
+        "iout": { "min": 0, "max": 65536 }
       },
       "rsd1": {
-        "vin1": {"min": 0, "max": 65536},
-        "vin2": {"min": 0, "max": 65536},
-        "vout": {"min": 0, "max": 65536}
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
       },
       "rsd1_2": {
-        "vin1": {"min": 0, "max": 65536},
-        "vin2": {"min": 0, "max": 65536},
-        "vout": {"min": 0, "max": 65536}
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      }
+    },
+    "booster_2_1": {
+      "before_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "after_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 },
+        "iout": { "min": 0, "max": 65536 }
+      },
+      "rsd1": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "rsd1_2": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      }
+    },
+    "booster_1_1": {
+      "before_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "after_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 },
+        "iout": { "min": 0, "max": 65536 }
+      },
+      "rsd2": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      }
+    },
+    "guard_1_1": {
+      "before_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "after_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 },
+        "iout": { "min": 0, "max": 65536 }
+      },
+      "rsd2": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
       }
     }
   },
   "stage3": {
     "guard_2_1": {
       "before_relay": {
-        "vin1": {"min": 0, "max": 65536},
-        "vin2": {"min": 0, "max": 65536},
-        "vout": {"min": 0, "max": 65536}
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
       },
       "after_relay": {
-        "vin1": {"min": 0, "max": 65536},
-        "vin2": {"min": 0, "max": 65536},
-        "vout": {"min": 0, "max": 65536},
-        "iout": {"min": 0, "max": 65536}
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 },
+        "iout": { "min": 0, "max": 65536 }
+      }
+    },
+    "booster_2_1": {
+      "before_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "after_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 },
+        "iout": { "min": 0, "max": 65536 }
+      }
+    },
+    "booster_1_1": {
+      "before_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "after_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 },
+        "iout": { "min": 0, "max": 65536 }
+      },
+      "rsd2": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      }
+    },
+    "guard_1_1": {
+      "before_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
+      },
+      "after_relay": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 },
+        "iout": { "min": 0, "max": 65536 }
+      },
+      "rsd2": {
+        "vin1": { "min": 0, "max": 65536 },
+        "vin2": { "min": 0, "max": 65536 },
+        "vout": { "min": 0, "max": 65536 }
       }
     }
   }

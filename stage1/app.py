@@ -142,7 +142,7 @@ def run_stage1(cfg: Stage1Config) -> int:
     io.wait_until_ready(timeout=2.0)
 
     # --- Phase 1: Environment Readiness (Internet & DB) ---
-    while True:
+    while not stop_requested:
         # 3-1) 인터넷 연결 확인
         io.set_loading(led_color="blue")
         net_ok = check_internet(timeout_s=3.0)
@@ -151,7 +151,10 @@ def run_stage1(cfg: Stage1Config) -> int:
         if not net_ok:
             io.show_code(E_INTERNET_NOT_FOUND.code)
             logger.error(f"Internet connection failed (Code: {E_INTERNET_NOT_FOUND.code}). Check network and press button.")
-            io.wait_for_button()
+            # 버튼이 눌릴 때까지 혹은 종료 요청이 올 때까지 대기
+            while not stop_requested:
+                if io.wait_for_button(timeout=1.0):
+                    break
             log_event(logger, event="stage1.boot.retry_requested", stage="stage1", data={"reason": "internet_fail"})
             continue
 
@@ -162,7 +165,10 @@ def run_stage1(cfg: Stage1Config) -> int:
             if not db_ok:
                 io.show_code(E_DB_CONNECTION_FAILED.code)
                 logger.error(f"DB Server connection failed (Code: {E_DB_CONNECTION_FAILED.code}). Check server status and press button.")
-                io.wait_for_button()
+                # 버튼이 눌릴 때까지 혹은 종료 요청이 올 때까지 대기
+                while not stop_requested:
+                    if io.wait_for_button(timeout=1.0):
+                        break
                 log_event(logger, event="stage1.boot.retry_requested", stage="stage1", data={"reason": "db_fail"})
                 continue
         
@@ -200,7 +206,7 @@ def run_stage1(cfg: Stage1Config) -> int:
     log_event(logger, event="stage1.boot", stage="stage1", data=boot_data)
     
     # --- Phase 2: Hardware Self-Test ---
-    while True:
+    while not stop_requested:
         io.set_loading(led_color="yellow")
         results = run_self_test(
             logger=logger,
@@ -215,6 +221,10 @@ def run_stage1(cfg: Stage1Config) -> int:
         if db_server:
             db_server.push_log(results.to_dict(), logger=logger)
 
+        # 셀프 테스트 종료 직후 종료 요청 확인
+        if stop_requested:
+            break
+
         if results.code == 0:
             # 성공 시 대기 모드 진입 및 루프 탈출
             io.show_code(0)
@@ -225,8 +235,10 @@ def run_stage1(cfg: Stage1Config) -> int:
             io.show_code(results.code)
             logger.error(f"Self-test failed (Code: {results.code}). Press the button to retry.")
 
-            # 버튼 대기 후 재시작 (셀프테스트 루프 처음으로 이동)
-            io.wait_for_button()
+            # 버튼이 눌릴 때까지 혹은 종료 요청이 올 때까지 대기
+            while not stop_requested:
+                if io.wait_for_button(timeout=1.0):
+                    break
             log_event(logger, event="stage1.boot.retry_requested", stage="stage1", data={"reason": "self_test_fail"})
             continue
 

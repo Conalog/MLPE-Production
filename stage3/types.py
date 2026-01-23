@@ -29,7 +29,7 @@ class Mlpe:
 
 @dataclass
 class AggregatedResult:
-    test: str  # e.g., "self", "stage1"
+    test: str  # e.g., "self", "stage3"
     code: int
     details: list[TestDetail] = field(default_factory=list)
     boot_data: Optional[dict[str, Any]] = None  # Additional context (e.g., boot info)
@@ -67,5 +67,3 @@ class StepResult:
     application_path: Optional[str] = None
     info: Optional[dict] = None
     stick_uid: Optional[str] = None
-
-

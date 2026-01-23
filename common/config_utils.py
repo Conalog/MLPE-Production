@@ -86,7 +86,9 @@ class ConfigSyncThread(threading.Thread):
         self._stop_event.set()
 
     def run(self):
+        from common.logging_utils import log_event
         if self.logger:
+            log_event(self.logger, event="config.sync.thread_started", data={"jig_id": self.jig_id, "interval": self.interval})
             self.logger.info(f"[Sync] Started for Jig ID: {self.jig_id} (Interval: {self.interval}s)")
 
         while not self._stop_event.is_set():
@@ -97,8 +99,13 @@ class ConfigSyncThread(threading.Thread):
                 if latest_data:
                     new_stage = latest_data.get("stage")
                     
+                    if self.logger:
+                        self.logger.debug(f"[Sync] Received data from server: {latest_data}")
+
                     # Atomic update of the local file
                     atomic_save_json(self.config_path, latest_data)
+                    if self.logger:
+                        self.logger.debug(f"[Sync] Saved to {self.config_path} (Product: {latest_data.get('product')})")
                     
                     # Check for stage change
                     if self.current_stage is not None and new_stage is not None:
@@ -113,7 +120,7 @@ class ConfigSyncThread(threading.Thread):
                 else:
                     # Config found but empty or not found
                     if self.logger:
-                        self.logger.debug(f"[Sync] No config response for ID: {self.jig_id}")
+                        self.logger.debug(f"[Sync] No config data received from server for ID: {self.jig_id}")
                 
             except Exception as e:
                 if self.logger:
@@ -220,4 +227,3 @@ def parse_stage1_pins(data: dict[str, Any]) -> Stage1Pins:
         led_b=_get_int(data, "led.b"),
         button_pin=_get_int(data, "button.pin"),
     )
-

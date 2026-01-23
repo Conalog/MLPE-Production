@@ -219,6 +219,24 @@ class SolarBridgeClient:
         }
         return self._run_command(stick_uid, target_id, "REQ_SET_MESH_CONFIG", args, logger=logger)
 
+    def get_mppt_status(self, target_id: str, stick_id: str, logger=None) -> Optional[dict]:
+        return self._run_command(stick_id, target_id, "REQ_GET_MPPT_STATUS", {}, logger=logger)
+
+    def enable_mppt(self, target_id: str, stick_id: str, enable: bool = True, logger=None) -> Optional[dict]:
+        args = {"status": enable}
+        return self._run_command(stick_id, target_id, "REQ_ENABLE_MPPT", args, logger=logger)
+
+    def set_mppt_config(self, target_id: str, stick_id: str, mppt_enable=None, max_duty=None, min_limit=None, max_limit=None, bypass_condition=None, logger=None) -> Optional[dict]:
+        # 0xFFFFFFFF means "do not change"
+        args = {
+            "mppt_enable": mppt_enable if mppt_enable is not None else 0xFFFFFFFF,
+            "max_duty": max_duty if max_duty is not None else 0xFFFFFFFF,
+            "duty_min_limit": min_limit if min_limit is not None else 0xFFFFFFFF,
+            "duty_max_limit": max_limit if max_limit is not None else 0xFFFFFFFF,
+            "bypass_condition": bypass_condition if bypass_condition is not None else False
+        }
+        return self._run_command(stick_id, target_id, "REQ_SET_MPPT_CONFIG", args, logger=logger)
+
     def _run_command(self, stick_uid: str, target_id: str, cmd_name: str, args: dict, logger=None) -> Optional[dict]:
         tid_norm = self._normalize_id(target_id)
         resp_name = cmd_name.replace("REQ_", "RESP_")

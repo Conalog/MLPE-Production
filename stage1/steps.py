@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import numpy as np
+import importlib
 from typing import Any
 
 from common.test_base import TestCase
@@ -208,11 +209,11 @@ class ADCResultChecker(TestCase):
             return {"code": E_ADC_VERIFICATION_FAIL.code, "log": "Target ID or Stick UID missing"}
 
         # Board type determination
-        info = g.target_device.info
-        vid, pid = info.get("vid"), info.get("pid")
-        v_name = {1: "guard", 2: "booster"}.get(vid, "unknown")
-        p_name = {1: "1_1", 2: "2_1"}.get(pid, "unknown")
-        board_type = f"{v_name}_{p_name}"
+        board_type = args.get("board_type")
+        if not board_type:
+             vendor = args.get("vendor", "unknown")
+             product = args.get("product", "unknown")
+             board_type = product if vendor == "conalog" else f"{vendor}_{product}"
 
         ranges = adc_config.get(stage, {}).get(board_type, {}).get(check_type, {})
         if not ranges:
@@ -271,6 +272,50 @@ class MeshConfigurator(TestCase):
         return {"code": 0, "log": f"Mesh config updated for {target_id}"}
 
 
+def run_steps_sequentially(
+    steps: list[tuple[str, TestCase]],
+    context: dict[str, Any],
+    logger: logging.Logger,
+    results: AggregatedResult
+) -> AggregatedResult:
+    total_steps = len(steps)
+    stage_name = context.get("stage", "stage1")
+    
+    for i, (name, step) in enumerate(steps, 1):
+        # Step specific overrides
+        if name == "ADC (Baseline)": context["check_type"] = "baseline"
+        elif name == "RSD1 ON": context.update({"rsd1": True, "rsd2": False})
+        elif name == "ADC (RSD1)": context["check_type"] = "rsd1"
+        elif name == "RSD2 ON": context.update({"rsd1": False, "rsd2": True})
+        elif name == "ADC (RSD2)": context["check_type"] = "rsd2"
+        elif name == "RSD1+2 ON": context.update({"rsd1": True, "rsd2": True})
+        elif name == "ADC (RSD1_2)": context["check_type"] = "rsd1_2"
+        elif name == "RSD All OFF": context.update({"rsd1": False, "rsd2": False})
+
+        logger.info(f"Running: {name}...")
+        res = step.run(context)
+        detail = TestDetail(case=name, log=res["log"], code=res["code"])
+        results.details.append(detail)
+        
+        if res["code"] != 0:
+            results.code = res["code"]
+            for line in res["log"].splitlines():
+                logger.error(f"  --> [FAIL] {line}")
+            log_event(logger, event=f"{stage_name}.step_failed", stage=stage_name, data={"case": name, "error": res["log"]})
+            return results # Stop sequence on failure
+        else:
+            for line in res["log"].splitlines():
+                logger.info(f"  --> [OK] {line}")
+            
+            if name == "Comm Tester":
+                logger.info("Comm Tester OK. Waiting 3s for stabilization...")
+                time.sleep(3.0)
+            
+        time.sleep(0.1)
+    
+    return results
+
+
 def run_stage_test(
     *,
     logger,
@@ -283,20 +328,12 @@ def run_stage_test(
 ) -> AggregatedResult:
     results = AggregatedResult(test=stage_name, code=0)
     
-    steps = [
+    common_steps = [
         ("Voltage Checker", VoltageChecker()),
         ("Device Recognizer", DeviceRecognizer()),
         ("Firmware Downloader", FirmwareDownloader()),
         ("Firmware Uploader", FirmwareUploader()),
         ("Comm Tester", CommTester()),
-        # ADC Verification Phases
-        ("ADC (Baseline)", ADCResultChecker()),
-        ("RSD1 ON", RSDController()),
-        ("ADC (RSD1)", ADCResultChecker()),
-        ("RSD1+2 ON", RSDController()),
-        ("ADC (RSD1_2)", ADCResultChecker()),
-        ("RSD All OFF", RSDController()),
-        ("Mesh Configurator", MeshConfigurator()),
     ]
     
     context = {
@@ -307,40 +344,39 @@ def run_stage_test(
         "product": product,
         "stage": stage_name,
         "adc_config": adc_config,
+        "board_type": product if vendor == "conalog" else f"{vendor}_{product}"
     }
 
-    final_code = 0
-    total_steps = len(steps)
-    for i, (name, step) in enumerate(steps, 1):
-        # Step specific overrides
-        if name == "ADC (Baseline)": context["check_type"] = "baseline"
-        elif name == "RSD1 ON": context.update({"rsd1": True, "rsd2": False})
-        elif name == "ADC (RSD1)": context["check_type"] = "rsd1"
-        elif name == "RSD1+2 ON": context.update({"rsd1": True, "rsd2": True})
-        elif name == "ADC (RSD1_2)": context["check_type"] = "rsd1_2"
-        elif name == "RSD All OFF": context.update({"rsd1": False, "rsd2": False})
+    logger.info(">>> Running Common Steps...")
+    results = run_steps_sequentially(common_steps, context, logger, results)
+    if results.code != 0:
+        return results
 
-        logger.info(f"[{i}/{total_steps}] Running: {name}...")
-        res = step.run(context)
-        detail = TestDetail(case=name, log=res["log"], code=res["code"])
-        results.details.append(detail)
+    # Determine board type from configuration (context)
+    # Stage 1 is initial flashing, so we trust the config more than wireless info.
+    vendor = context.get("vendor", "unknown")
+    product = context.get("product", "unknown")
+    
+    if vendor in ["conalog", "nanoom"]:
+        board_type = product
+    else:
+        board_type = f"{vendor}_{product}"
+    
+    logger.info(f">>> Target Board: {board_type}. Running board-specific tests...")
+    
+    try:
+        board_module = importlib.import_module(f"stage1.boards.{board_type}")
+        board_results = board_module.run_stage_test(context)
         
-        if res["code"] != 0:
-            final_code = res["code"]
-            for line in res["log"].splitlines():
-                logger.error(f"  --> [FAIL] {line}")
-            log_event(logger, event=f"{stage_name}.step_failed", stage=stage_name, data={"case": name, "error": res["log"]})
-            break # 중대 오류 시 시퀀스 중단
-        else:
-            for line in res["log"].splitlines():
-                logger.info(f"  --> [OK] {line}")
-            
-            # Comm Tester 이후 3초간 대기 (장치 안정화용)
-            if name == "Comm Tester":
-                logger.info("Comm Tester OK. Waiting 3s for stabilization...")
-                time.sleep(3.0)
-            
-        time.sleep(0.1)
+        # Merge board results into main results
+        results.details.extend(board_results.details)
+        results.code = board_results.code
+        
+    except ImportError:
+        logger.error(f"Test implementation for board '{board_type}' not found.")
+        results.code = E_DEVICE_RECOGNITION_FAIL.code # Or a more specific error
+    except Exception as e:
+        logger.error(f"Error during board-specific test execution: {e}")
+        results.code = -1
 
-    results.code = final_code
     return results

@@ -79,7 +79,7 @@ def main() -> int:
         db_server=db_server,
         jig_id=jig_id,
         config_path="configs/jig.json",
-        interval=3.0,
+        interval=1.0,
         on_stage_changed=on_stage_changed,
         logger=logger
     )

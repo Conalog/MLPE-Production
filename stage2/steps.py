@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import numpy as np
+import importlib
 from typing import Any
 
 from common.test_base import TestCase
@@ -119,7 +120,7 @@ class ADCResultChecker(TestCase):
         target_id = g.target_device.device_id
         stick_uid = args.get("stick_uid")
         check_type = args.get("check_type", "before_relay") 
-        board_type = args.get("product", "guard_2_1")
+        board_type = args.get("board_type", "guard_2_1")
         stage = args.get("stage_name", "stage2")
         adc_config = args.get("adc_config", {})
 
@@ -164,6 +165,12 @@ class ADCResultChecker(TestCase):
                 
             avg_val = sum(values) / len(values)
             result_details.append(f"{field_name} Raw: {avg_val:.1f}")
+            
+            # Save baseline Vout for DutyRatio test if applicable
+            if check_type == "before_relay" and field_name == "vout":
+                g.target_device.baseline_vout = avg_val
+                args["logger"].debug(f"Saved baseline_vout: {avg_val:.1f}")
+
             if not (min_v <= avg_val <= max_v):
                 errors.append(f"{field_name} out of range: {avg_val:.1f} (Exp: {min_v}~{max_v})")
 
@@ -196,6 +203,172 @@ class RSDController(TestCase):
             return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"RSD control error: {e}"}
 
 
+class DutyRatioTester(TestCase):
+    """
+    Booster Duty control and output voltage verification.
+    Verifies that Vout changes proportionally to PWM Duty (25%, 50%, 75%).
+    """
+    def run(self, args: dict[str, Any]) -> dict[str, Any]:
+        target_id = g.target_device.device_id
+        stick_uid = args.get("stick_uid")
+        logger = args["logger"]
+        
+        if not target_id or not stick_uid:
+            return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": "Device ID or Stick UID missing"}
+
+        # 1. Initial Vout (baseline)
+        baseline_vout = g.target_device.baseline_vout
+        if baseline_vout is None:
+            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": "Baseline Vout not found. Ensure ADC Check (Before Relay) ran first."}
+        
+        logger.info(f"  --> Baseline Vout: {baseline_vout:.1f}")
+
+        # 2. Get Initial MPPT Status (Backup)
+        mppt_status = g.bridge.get_mppt_status(target_id, stick_uid, logger=logger)
+        if not mppt_status:
+            return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": "Failed to get MPPT status"}
+        
+        initial_mppt = mppt_status.get("mppt", False)
+        initial_min = mppt_status.get("min_limit")
+        initial_max = mppt_status.get("max_limit")
+        initial_max_duty = mppt_status.get("max_duty")
+        initial_bypass = mppt_status.get("bypass_condition", False)
+        
+        max_pwm = initial_max_duty if initial_max_duty is not None else 2000
+        logger.info(f"  --> Detected Max Duty: {max_pwm}")
+
+        try:
+            # 3. MPPT Enable
+            if not g.bridge.enable_mppt(target_id, stick_uid, enable=True, logger=logger):
+                return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": "Failed to enable MPPT"}
+            
+            logger.info("  --> MPPT Enabled. Starting Duty Sequence...")
+
+            # 4-9. Set Duty and Check ADC
+            duty_steps = [0.75, 0.50, 0.25]
+            logs = []
+            
+            for ratio in duty_steps:
+                target_duty = int(max_pwm * ratio)
+                logger.info(f"  --> Setting Duty to {ratio*100:.0f}% ({target_duty})...")
+                
+                # Set fixed duty by setting min=max=target_duty
+                res_set = g.bridge.set_mppt_config(
+                    target_id, stick_uid, 
+                    min_limit=target_duty, 
+                    max_limit=target_duty, 
+                    bypass_condition=True,
+                    logger=logger
+                )
+                if not res_set:
+                    return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"Failed to set duty to {ratio*100:.0f}%"}
+                
+                time.sleep(1.5) # Wait for stability
+                
+                # ADC Check
+                samples = g.bridge.dump_adc(target_id, stick_uid, duration=1.0, logger=logger)
+                if not samples:
+                    return {"code": E_ADC_VERIFICATION_FAIL.code, "log": f"Failed to collect ADC samples for {ratio*100:.0f}% duty"}
+                
+                # Calculate average vout
+                v_values = [s.get("vout_raw") or s.get("vout") for s in samples if (s.get("vout_raw") is not None or s.get("vout") is not None)]
+                if not v_values:
+                    return {"code": E_ADC_VERIFICATION_FAIL.code, "log": f"Vout field missing in samples for {ratio*100:.0f}% duty"}
+                
+                avg_vout = sum(v_values) / len(v_values)
+                
+                # Verification
+                expected_v = baseline_vout * ratio
+                tolerance = 0.15 * baseline_vout # 15% tolerance
+                
+                status = "OK" if abs(avg_vout - expected_v) < tolerance else "FAIL"
+                logs.append(f"Duty {ratio*100:.0f}%: Measured {avg_vout:.1f} (Exp: ~{expected_v:.1f}) -> {status}")
+                
+                if status == "FAIL":
+                    return {"code": E_ADC_VERIFICATION_FAIL.code, "log": " | ".join(logs)}
+
+            return {"code": 0, "log": " | ".join(logs)}
+
+        finally:
+            logger.info("  --> Restoring initial MPPT configuration...")
+            # Restore settings (use original values or do-not-change 0xFFFFFFFF if missing)
+            g.bridge.set_mppt_config(
+                target_id, stick_uid, 
+                max_duty=initial_max_duty if initial_max_duty is not None else 0xFFFFFFFF,
+                min_limit=initial_min if initial_min is not None else 0xFFFFFFFF,
+                max_limit=initial_max if initial_max is not None else 0xFFFFFFFF,
+                bypass_condition=initial_bypass,
+                logger=logger
+            )
+            g.bridge.enable_mppt(target_id, stick_uid, enable=initial_mppt, logger=logger)
+
+        # Finish: Disable MPPT (optional, maybe leave it to the user?)
+        # User requested sequence ends at point 9.
+        
+        return {"code": 0, "log": " | ".join(logs)}
+
+
+def run_steps_sequentially(
+    steps: list[tuple[str, TestCase]],
+    context: dict[str, Any],
+    logger: logging.Logger,
+    results: AggregatedResult
+) -> AggregatedResult:
+    total_steps = len(steps)
+    stage_name = context.get("stage_name", "stage2")
+    
+    for i, (name, step) in enumerate(steps, 1):
+        # Step specific overrides
+        if name == "ADC Check (Before Relay)":
+            context["check_type"] = "before_relay"
+        elif name == "ADC Check (After Relay)":
+            context["check_type"] = "after_relay"
+        elif name == "Relay ON":
+            context["target_state"] = "ON"
+        elif name == "Relay OFF":
+            context["target_state"] = "OFF"
+        elif name == "RSD1 ON":
+            context.update({"rsd1": True, "rsd2": False})
+        elif name == "ADC (RSD1)":
+            context["check_type"] = "rsd1"
+        elif name == "RSD2 ON":
+            context.update({"rsd1": False, "rsd2": True})
+        elif name == "ADC (RSD2)":
+            context["check_type"] = "rsd2"
+        elif name == "RSD1+2 ON":
+            context.update({"rsd1": True, "rsd2": True})
+        elif name == "ADC (RSD1_2)":
+            context["check_type"] = "rsd1_2"
+        elif name == "RSD All OFF":
+            context.update({"rsd1": False, "rsd2": False})
+
+        logger.info(f"Running: {name}...")
+        res = step.run(context)
+        detail = TestDetail(case=name, log=res["log"], code=res["code"])
+        results.details.append(detail)
+        
+        if res["code"] != 0:
+            results.code = res["code"]
+            for line in res["log"].splitlines():
+                logger.error(f"  --> [FAIL] {line}")
+            log_event(logger, event=f"{stage_name}.step_failed", stage=stage_name, data={"case": name, "error": res["log"]})
+            
+            # Stage 2 특유의 실패 시 정리 로직
+            if name != "RSD All OFF" and name != "Relay OFF":
+                 logger.info("Cleaning up: Turning off RSD and Relay...")
+                 RSDController().run({**context, "rsd1": False, "rsd2": False})
+                 RelayController().run({**context, "target_state": "OFF"})
+            
+            return results 
+        else:
+            for line in res["log"].splitlines():
+                logger.info(f"  --> [OK] {line}")
+            
+        time.sleep(0.1)
+    
+    return results
+
+
 def run_stage_test(
     *,
     logger,
@@ -210,20 +383,9 @@ def run_stage_test(
 ) -> AggregatedResult:
     results = AggregatedResult(test=stage_name, code=0)
     
-    # 2단계 검증 시퀀스 정의
-    steps = [
+    common_steps = [
         ("Neighbor Scanner", NeighborScanner()),
         ("Device Verifier", DeviceVerifier()),
-        ("ADC Check (Before Relay)", ADCResultChecker()),
-        ("Relay ON", RelayController()),
-        ("ADC Check (After Relay)", ADCResultChecker()),
-        # Expanding with RSD States
-        ("RSD1 ON", RSDController()),
-        ("ADC (RSD1)", ADCResultChecker()),
-        ("RSD1+2 ON", RSDController()),
-        ("ADC (RSD1_2)", ADCResultChecker()),
-        ("RSD All OFF", RSDController()),
-        ("Relay OFF", RelayController()), # 테스트 종료 후 Relay OFF (안전)
     ]
     
     context = {
@@ -236,62 +398,38 @@ def run_stage_test(
         "adc_config": adc_config,
         "relay_pin": relay_pin,
         "relay_active_high": relay_active_high,
+        "board_type": product if vendor in ["conalog", "nanoom"] else f"{vendor}_{product}"
     }
 
-    final_code = 0
-    total_steps = len(steps)
-    for i, (name, step) in enumerate(steps, 1):
-        logger.info(f"[{i}/{total_steps}] Running: {name}...")
-        
-        # 단계별 파라미터 업데이트
-        if name == "ADC Check (Before Relay)":
-            context["check_type"] = "before_relay"
-        elif name == "ADC Check (After Relay)":
-            context["check_type"] = "after_relay"
-        elif name == "Relay ON":
-            context["target_state"] = "ON"
-        elif name == "Relay OFF":
-            context["target_state"] = "OFF"
-        elif name == "RSD1 ON":
-            context.update({"rsd1": True, "rsd2": False})
-        elif name == "ADC (RSD1)":
-            context["check_type"] = "rsd1"
-        elif name == "RSD1+2 ON":
-            context.update({"rsd1": True, "rsd2": True})
-        elif name == "ADC (RSD1_2)":
-            context["check_type"] = "rsd1_2"
-        elif name == "RSD All OFF":
-            context.update({"rsd1": False, "rsd2": False})
+    logger.info(">>> Running Common Steps...")
+    results = run_steps_sequentially(common_steps, context, logger, results)
+    if results.code != 0:
+        return results
 
-        res = step.run(context)
+    # Determine board type from configuration (context)
+    # Stage 2 is post-assembly, we trust the config.
+    vendor = context.get("vendor", "unknown")
+    product = context.get("product", "unknown")
+    
+    if vendor in ["conalog", "nanoom"]:
+        board_type = product
+    else:
+        board_type = f"{vendor}_{product}"
+    
+    logger.info(f">>> Target Board: {board_type}. Running board-specific tests...")
+    
+    try:
+        board_module = importlib.import_module(f"stage2.boards.{board_type}")
+        board_results = board_module.run_stage_test(context)
         
-        # NeighborScanner에서 찾은 stick_uid 보관 (이후 단계에서 사용)
-        if "stick_uid" in context:
-            pass # 이미 NeighborScanner가 업데이트함
-        elif name == "Neighbor Scanner" and res["code"] == 0:
-            # NeighborScanner.run internally updates context if we passed 'args' 
-            # and assigned it. But NeighborScanner uses args["stick_uid"] = stick_uid
-            pass
-
-        detail = TestDetail(case=name, log=res["log"], code=res["code"])
-        results.details.append(detail)
+        results.details.extend(board_results.details)
+        results.code = board_results.code
         
-        if res["code"] != 0:
-            final_code = res["code"]
-            for line in res["log"].splitlines():
-                logger.error(f"  --> [FAIL] {line}")
-            log_event(logger, event=f"{stage_name}.step_failed", stage=stage_name, data={"case": name, "error": res["log"]})
-            
-            # 실패 시에도 모든 상태 초기화 시도
-            if name != "RSD All OFF" and name != "Relay OFF":
-                 RSDController().run({**context, "rsd1": False, "rsd2": False})
-                 RelayController().run({**context, "target_state": "OFF"})
-            break 
-        else:
-            for line in res["log"].splitlines():
-                logger.info(f"  --> [OK] {line}")
-            
-        time.sleep(0.1)
+    except ImportError:
+        logger.error(f"Test implementation for board '{board_type}' not found.")
+        results.code = E_DEVICE_RECOGNITION_FAIL.code
+    except Exception as e:
+        logger.error(f"Error during board-specific test execution: {e}")
+        results.code = -1
 
-    results.code = final_code
     return results
