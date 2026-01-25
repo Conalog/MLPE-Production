@@ -28,6 +28,7 @@ class SolarBridgeClient:
         self._mlpe_data: dict[str, Any] = {}
         self._adc_data: dict[str, list[dict[str, Any]]] = {}
         self._clear_neighbors_results: dict[str, bool] = {}
+        self._upper_id_map: dict[str, int] = {}  # Map lower 4-byte ID to upper 2-byte ID
         
         self._response_event = threading.Event()
         self._result_event = threading.Event()
@@ -125,6 +126,12 @@ class SolarBridgeClient:
                                 "vid": (v_raw >> 28) & 0x0F, "pid": (v_raw >> 20) & 0x0F,
                                 "version_unpacked": f"{(v_raw >> 16) & 0x0F}.{(v_raw >> 8) & 0xFF}.{v_raw & 0xFF}"
                             })
+                        
+                        # Capture id_high if present
+                        id_high = res_payload.get("id_high")
+                        if id_high is not None:
+                            res_payload["upper_id"] = id_high
+
                     tid = self._normalize_id(data.get("mlpe_id") or data.get("l3_header", {}).get("src") or topic.split("/")[2])
                     
                     # 모든 /rx 데이터는 mlpe_data에 저장 (ID별로 관리)

@@ -187,8 +187,8 @@ def run_stage3(cfg: Stage3Config) -> int:
         # 부팅 정보를 self-test 로그의 boot_data 키에 추가
         results.boot_data = boot_data
 
-        if db_server:
-            db_server.push_log(results.to_dict(), logger=logger)
+# if db_server:
+        #     db_server.push_log(results.to_dict(), logger=logger)
 
         # 셀프 테스트 종료 직후 종료 요청 확인
         if stop_requested:

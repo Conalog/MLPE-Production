@@ -98,6 +98,40 @@ class DeviceVerifier(TestCase):
         return {"code": 0, "log": f"Device {target_id} verified"}
 
 
+class CommTester(TestCase):
+    """
+    Check communication with the target device and get info (id_high).
+    """
+    def run(self, args: dict[str, Any]) -> dict[str, Any]:
+        target_id = g.target_device.device_id
+        stick_uid = args.get("stick_uid")
+        if not target_id or not stick_uid:
+            return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": "Device ID or Stick UID missing"}
+        
+        try:
+            info = g.bridge.get_device_info(target_id, stick_uid, logger=args.get("logger"))
+            if not info:
+                return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"Failed to get info from {target_id}"}
+            
+            g.target_device.info = info
+            upper_id = info.get("upper_id")
+            
+            log_msg = f"Communication OK. Version: {info.get('version_unpacked', 'Unknown')}"
+            if upper_id is not None:
+                try:
+                    if isinstance(upper_id, str):
+                        u_int = int(upper_id, 16) if upper_id.startswith("0x") else int(upper_id)
+                    else:
+                        u_int = int(upper_id)
+                    log_msg += f" (Upper ID: 0x{u_int:04X})"
+                except (ValueError, TypeError):
+                    log_msg += f" (Upper ID: {upper_id})"
+            
+            return {"code": 0, "log": log_msg, "parameter": {"upper_id": upper_id}}
+        except Exception as e:
+            return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"Communication error: {e}"}
+
+
 class RelayController(TestCase):
     def run(self, args: dict[str, Any]) -> dict[str, Any]:
         io = args["io"]
@@ -344,8 +378,13 @@ def run_steps_sequentially(
 
         logger.info(f"Running: {name}...")
         res = step.run(context)
-        detail = TestDetail(case=name, log=res["log"], code=res["code"])
+        parameter = res.get("parameter", {"log": res.get("log", "")})
+        detail = TestDetail(case=name, parameter=parameter, code=res["code"])
         results.details.append(detail)
+        
+        # If this test found the upper_id, update result's upper_id
+        if parameter.get("upper_id") is not None:
+            results.upper_id = parameter["upper_id"]
         
         if res["code"] != 0:
             results.code = res["code"]
@@ -386,6 +425,7 @@ def run_stage_test(
     common_steps = [
         ("Neighbor Scanner", NeighborScanner()),
         ("Device Verifier", DeviceVerifier()),
+        ("Communication Test", CommTester()),
     ]
     
     context = {
@@ -403,6 +443,10 @@ def run_stage_test(
 
     logger.info(">>> Running Common Steps...")
     results = run_steps_sequentially(common_steps, context, logger, results)
+
+    # Fill device info from globals (populated by NeighborScanner or DeviceVerifier)
+    results.device_id = g.target_device.device_id
+
     if results.code != 0:
         return results
 

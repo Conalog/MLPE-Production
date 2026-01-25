@@ -80,8 +80,7 @@ class DeviceRecognizer(TestCase):
             # 전역 MLPE 상태 업데이트
             g.target_device.ficr = ficr_dict
             addr = ficr_dict.get("device_addr", "000000000000")
-            g.target_device.device_addr = addr
-            g.target_device.device_id = f"0x{addr[-8:].upper()}"
+            g.target_device.device_id = addr.upper() # Full 6-byte address
             
             return {"code": 0, "log": f"Device recognized: {g.target_device.device_id}"}
             
@@ -294,7 +293,8 @@ def run_steps_sequentially(
 
         logger.info(f"Running: {name}...")
         res = step.run(context)
-        detail = TestDetail(case=name, log=res["log"], code=res["code"])
+        parameter = res.get("parameter", {"log": res.get("log", "")})
+        detail = TestDetail(case=name, parameter=parameter, code=res["code"])
         results.details.append(detail)
         
         if res["code"] != 0:
@@ -349,6 +349,10 @@ def run_stage_test(
 
     logger.info(">>> Running Common Steps...")
     results = run_steps_sequentially(common_steps, context, logger, results)
+    
+    # Fill device info from globals (populated by DeviceRecognizer)
+    results.device_id = g.target_device.device_id
+
     if results.code != 0:
         return results
 

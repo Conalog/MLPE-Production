@@ -40,11 +40,13 @@ class TestDBServer(DBServer):
     def push_log(self, data: dict[str, Any], logger: logging.Logger | None = None) -> bool:
         endpoint = f"{self.url}/api/collections/{self.collection}/records"
 
-        # PocketBase 스키마와의 충돌(Relation 필드 유효성 검사)을 피하기 위해
-        # 확실한 필드들만 포함하여 전송합니다.
+        # Extract new fields from data and build the 4-column payload
+        # data.pop() removes the field from data so remaining data becomes 'log'
         payload = {
             "jig": self.factory_id,
-            "log": data
+            "deviceid": data.pop("deviceid", ""),
+            "message": data.pop("message", ""),
+            "log": data  # Remaining: test, code, details, boot_data
         }
 
         try:

@@ -51,6 +51,32 @@ class DeviceVerifier(TestCase):
         time.sleep(0.5)
         return {"code": 0, "log": f"Device {target_id} verified (Stage 3)"}
 
+class CommTester(TestCase):
+    def run(self, args: dict[str, Any]) -> dict[str, Any]:
+        target_id = g.target_device.device_id
+        stick_uid = args.get("stick_uid")
+        if not target_id or not stick_uid:
+            return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": "ID or UID missing"}
+        try:
+            info = g.bridge.get_device_info(target_id, stick_uid, logger=args.get("logger"))
+            if not info:
+                return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": "Failed to get info"}
+            g.target_device.info = info
+            upper_id = info.get("upper_id")
+            log_msg = f"Comm OK. Version: {info.get('version_unpacked', 'Unknown')}"
+            if upper_id is not None:
+                try:
+                    if isinstance(upper_id, str):
+                        u_int = int(upper_id, 16) if upper_id.startswith("0x") else int(upper_id)
+                    else:
+                        u_int = int(upper_id)
+                    log_msg += f" (Upper ID: 0x{u_int:04X})"
+                except:
+                    log_msg += f" (Upper ID: {upper_id})"
+            return {"code": 0, "log": log_msg, "parameter": {"upper_id": upper_id}}
+        except Exception as e:
+            return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"Comm error: {e}"}
+
 class RelayController(TestCase):
     def run(self, args: dict[str, Any]) -> dict[str, Any]:
         io = args["io"]
@@ -206,7 +232,13 @@ def run_steps_sequentially(steps: list[tuple[str, TestCase]], context: dict[str,
 
         logger.info(f"Running: {name}...")
         res = step.run(context)
-        results.details.append(TestDetail(case=name, log=res["log"], code=res["code"]))
+        parameter = res.get("parameter", {"log": res.get("log", "")})
+        detail = TestDetail(case=name, parameter=parameter, code=res["code"])
+        results.details.append(detail)
+        
+        # If this test found the upper_id, update result's upper_id
+        if parameter.get("upper_id") is not None:
+            results.upper_id = parameter["upper_id"]
         if res["code"] != 0:
             results.code = res["code"]
             logger.error(f"  --> [FAIL] {res['log']}")
@@ -217,11 +249,15 @@ def run_steps_sequentially(steps: list[tuple[str, TestCase]], context: dict[str,
 
 def run_stage_test(*, logger, io, db_server, vendor, product, stage_name: str = "stage3", adc_config: dict = {}, relay_pin: int = None, relay_active_high: bool = True) -> AggregatedResult:
     results = AggregatedResult(test=stage_name, code=0)
-    common_steps = [("Neighbor Scanner", NeighborScanner()), ("Device Verifier", DeviceVerifier())]
+    common_steps = [("Neighbor Scanner", NeighborScanner()), ("Device Verifier", DeviceVerifier()), ("Communication Test", CommTester())]
     context = {"logger": logger, "io": io, "db_server": db_server, "vendor": vendor, "product": product, "stage_name": stage_name, "adc_config": adc_config, "relay_pin": relay_pin, "relay_active_high": relay_active_high}
     
     logger.info(">>> Running Common Steps...")
     results = run_steps_sequentially(common_steps, context, logger, results)
+
+    # Fill device info from globals
+    results.device_id = g.target_device.device_id
+
     if results.code != 0: return results
 
     board_type = product if vendor in ["conalog", "nanoom"] else f"{vendor}_{product}"

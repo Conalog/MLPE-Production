@@ -1,7 +1,7 @@
 {
   "jig_id": "conalog-jig-000000000000002",
   "vendor": "conalog",
-  "product": "guard_2_1",
+  "product": "booster_1_1",
   "stage": 2,
   "timezone": "auto",
   "adc_scales": [

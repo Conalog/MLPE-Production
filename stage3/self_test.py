@@ -95,7 +95,7 @@ def run_self_test(
     for name, checker in checkers:
         logger.info(f"Running: {name}...")
         res = checker.run(args)
-        detail = TestDetail(case=name, log=res["log"], code=res["code"])
+        detail = TestDetail(case=name, parameter={"log": res["log"]}, code=res["code"])
         results.details.append(detail)
 
         if res["code"] != 0:
