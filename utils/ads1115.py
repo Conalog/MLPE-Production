@@ -38,10 +38,22 @@ class ADS1115Reader:
             print(f"채널 {ch} 읽기 중 에러: {e}")
             return 0.0
 
+    def _read_raw(self, ch: int) -> int:
+        try:
+            return self._channels[ch].value
+        except Exception as e:
+            print(f"채널 {ch} 로우 데이터 읽기 중 에러: {e}")
+            return 0
+
     def read_adc_0(self) -> float: return self._read_input_voltage(0)
     def read_adc_1(self) -> float: return self._read_input_voltage(1)
     def read_adc_2(self) -> float: return self._read_input_voltage(2)
     def read_adc_3(self) -> float: return self._read_input_voltage(3)
+
+    def read_adc_raw_0(self) -> int: return self._read_raw(0)
+    def read_adc_raw_1(self) -> int: return self._read_raw(1)
+    def read_adc_raw_2(self) -> int: return self._read_raw(2)
+    def read_adc_raw_3(self) -> int: return self._read_raw(3)
 
     def is_connected(self) -> bool:
         """가장 확실한 연결 확인 방법: 더미 읽기 시도"""

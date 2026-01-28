@@ -83,6 +83,25 @@ class IOThread:
             except Exception:
                 return 0.0, 0.0
 
+    def read_voltages_detailed(self) -> dict[str, Any]:
+        """ADC 0번(12V)과 1번(3.3V) 채널의 전압(Raw 및 계산값)을 반환합니다."""
+        with self._hw_lock:
+            if self._adc is None:
+                return {"12V_raw": 0, "12V_calc": 0.0, "3.3V_raw": 0, "3.3V_calc": 0.0}
+            try:
+                r12 = self._adc.read_adc_raw_0()
+                v12 = self._adc.read_adc_0()
+                r33 = self._adc.read_adc_raw_1()
+                v33 = self._adc.read_adc_1()
+                return {
+                    "12V_raw": r12,
+                    "12V_calc": v12,
+                    "3.3V_raw": r33,
+                    "3.3V_calc": v33
+                }
+            except Exception:
+                return {"12V_raw": 0, "12V_calc": 0.0, "3.3V_raw": 0, "3.3V_calc": 0.0}
+
     def stop(self, timeout: float = 1.0) -> None:
         self._stop.set()
         self._thread.join(timeout=timeout)

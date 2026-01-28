@@ -27,7 +27,7 @@ class Mlpe:
 
 @dataclass
 class AggregatedResult:
-    test: str  # e.g., "self", "stage3"
+    test: str  # e.g., "self", "stage1"
     code: int
     device_id: Optional[str] = None      # Lower 4-byte ID (hex string, e.g., 0xAABBCCDD)
     upper_id: Optional[int] = None       # Upper 2-byte ID (integer)
@@ -93,3 +93,5 @@ class StepResult:
     application_path: Optional[str] = None
     info: Optional[dict] = None
     stick_uid: Optional[str] = None
+
+

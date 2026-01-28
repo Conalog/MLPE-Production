@@ -13,14 +13,33 @@ from common.logging_utils import log_event
 from .nrf52_ficr import NRF52FICR
 from . import globals as g
 from common.error_codes import (
+    E_RELAY_INIT_FAIL,
     E_VOLTAGE_12V_OUT_OF_RANGE,
     E_VOLTAGE_3V3_OUT_OF_RANGE,
     E_DEVICE_RECOGNITION_FAIL,
+    E_NEIGHBOR_NOT_FOUND,
     E_FIRMWARE_DOWNLOAD_FAIL,
     E_FIRMWARE_UPLOAD_FAIL,
     E_DEVICE_COMMUNICATION_FAIL,
-    E_ADC_VERIFICATION_FAIL
+    E_ADC_VERIFICATION_FAIL,
+    E_DUTY_RATIO_VERIFICATION_FAIL,
+    E_MESH_CONFIG_FAIL
 )
+
+# Vendor/Product ID Mapping (matches solar-bridge/internal/models/metadata.go)
+VENDOR_MAP = {
+    "stick": 0,
+    "conalog": 1,
+    "nanoom": 2,
+}
+
+PRODUCT_MAP = {
+    "stick": 0,
+    "guard_1_1": 1,
+    "guard_2_1": 2,
+    "booster_1_1": 3,
+    "booster_2_1": 4,
+}
 
 
 
@@ -40,7 +59,7 @@ class NeighborScanner(TestCase):
             # 1. Discover Stick
             sticks = g.bridge.list_sticks()
             if not sticks:
-                return {"code": E_DEVICE_RECOGNITION_FAIL.code, "log": "No active sticks found for scanning"}
+                return {"code": E_NEIGHBOR_NOT_FOUND.code, "log": "No active sticks found for scanning"}
             
             stick_uid = sticks[0]["uid"]
 
@@ -58,25 +77,65 @@ class NeighborScanner(TestCase):
             neighbors = g.bridge.get_neighbors(stick_uid, logger=args.get("logger"))
             
             if not neighbors:
-                return {"code": E_DEVICE_RECOGNITION_FAIL.code, "log": "No neighbors found"}
+                return {"code": E_NEIGHBOR_NOT_FOUND.code, "log": "No neighbors found"}
 
-            # Log all found neighbors (Part of final_log for reporting)
-            neighbor_list_str = ", ".join([f"{n['id']}({n['rssi']})" for n in neighbors])
+            # Log all found neighbors
+            def get_ver(n):
+                v = n.get("version", "v0.0.0")
+                return v
 
-            # 5. Choose device with the STRONGEST RSSI (closest to 0)
-            # RSSI is typically negative (-40 is strong, -90 is weak).
-            # To be safe, we sort in descending order and pick the first one.
-            sorted_neighbors = sorted(neighbors, key=lambda x: x.get("rssi", -100), reverse=True)
-            target = sorted_neighbors[0]
+            neighbor_list_str = ", ".join([f"{n['id']}({n['rssi']}, v:{get_ver(n)})" for n in neighbors])
+            args["logger"].debug(f"Found {len(neighbors)} neighbors: [{neighbor_list_str}]")
+
+            # 5. Filter by Vendor and Product ID from Config
+            expected_vendor = args.get("vendor", "conalog").lower()
+            expected_product = args.get("product", "unknown").lower()
+            
+            # Map names to IDs
+            target_vid = VENDOR_MAP.get(expected_vendor)
+            target_pid = PRODUCT_MAP.get(expected_product)
+            
+            if target_vid is None or target_pid is None:
+                args["logger"].warning(f"Unknown vendor/product in config: {expected_vendor}/{expected_product}. ID filtering bypassed.")
+                matching_neighbors = neighbors
+            else:
+                matching_neighbors = []
+                for n in neighbors:
+                    # Filter by string match (case-insensitive)
+                    # Bridge returns "Conalog", "Guard_2_1" etc via models.GetSolarVendorName
+                    vid_name = n.get("vid", "unknown").lower()
+                    pid_name = n.get("pid", "unknown").lower()
+                    
+                    if vid_name == expected_vendor and pid_name == expected_product:
+                        matching_neighbors.append(n)
+                
+                if not matching_neighbors:
+                    log_err = f"No devices found matching {expected_vendor}/{expected_product}. Found: {neighbor_list_str}"
+                    return {"code": E_NEIGHBOR_NOT_FOUND.code, "log": log_err}
+
+            # 6. Choose device with the STRONGEST RSSI from matches
+            sorted_matches = sorted(matching_neighbors, key=lambda x: x.get("rssi", -100), reverse=True)
+            target = sorted_matches[0]
             
             g.target_device.device_id = target["id"]
             args["stick_uid"] = stick_uid
             
             final_log = [
-                f"Found {len(neighbors)} neighbors: [{neighbor_list_str}]",
+                f"Found {len(neighbors)} neighbors total.",
+                f"Filtered {len(matching_neighbors)} matches for {expected_vendor}/{expected_product}.",
                 f"Target selected via RSSI({target['rssi']}): {target['id']}"
             ]
-            return {"code": 0, "log": "\n".join(final_log)}
+            log_summary = "\n".join(final_log)
+            return {
+                "code": 0, 
+                "log": log_summary,
+                "parameter": {
+                    "log": log_summary,
+                    "neighbors": neighbors,
+                    "matches": matching_neighbors,
+                    "selected_id": target["id"]
+                }
+            }
 
         except Exception as e:
             return {"code": E_DEVICE_RECOGNITION_FAIL.code, "log": f"Scanning error: {str(e)}"}
@@ -90,12 +149,13 @@ class DeviceVerifier(TestCase):
     def run(self, args: dict[str, Any]) -> dict[str, Any]:
         target_id = g.target_device.device_id
         if not target_id:
-            return {"code": E_DEVICE_RECOGNITION_FAIL.code, "log": "No target device selected."}
+            return {"code": E_NEIGHBOR_NOT_FOUND.code, "log": "No target device selected."}
         
         # Todo: Implement verification logic (e.g. checking specific HW pins or matching against expected ID)
         time.sleep(0.5)
         
-        return {"code": 0, "log": f"Device {target_id} verified"}
+        log_msg = f"Device {target_id} verified"
+        return {"code": 0, "log": log_msg, "parameter": {"log": log_msg, "ID": target_id}}
 
 
 class CommTester(TestCase):
@@ -115,6 +175,7 @@ class CommTester(TestCase):
             
             g.target_device.info = info
             upper_id = info.get("upper_id")
+            g.target_device.upper_id = upper_id
             
             log_msg = f"Communication OK. Version: {info.get('version_unpacked', 'Unknown')}"
             if upper_id is not None:
@@ -127,7 +188,13 @@ class CommTester(TestCase):
                 except (ValueError, TypeError):
                     log_msg += f" (Upper ID: {upper_id})"
             
-            return {"code": 0, "log": log_msg, "parameter": {"upper_id": upper_id}}
+            parameter = {
+                "log": log_msg,
+                "version": info.get("version_unpacked", "Unknown"),
+                "uptime": info.get("uptime", 0),
+                "upper_id": upper_id
+            }
+            return {"code": 0, "log": log_msg, "parameter": parameter}
         except Exception as e:
             return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"Communication error: {e}"}
 
@@ -144,7 +211,14 @@ class RelayController(TestCase):
             else:
                 io.set_relay(False)
                 log_msg = "Relay set to OFF via IOThread"
-            return {"code": 0, "log": log_msg}
+            return {
+                "code": 0, 
+                "log": log_msg, 
+                "parameter": {
+                    "log": log_msg, 
+                    "target_state": target_state
+                }
+            }
         except Exception as e:
             return {"code": E_RELAY_INIT_FAIL.code, "log": f"Relay control error: {e}"}
 
@@ -209,10 +283,21 @@ class ADCResultChecker(TestCase):
                 errors.append(f"{field_name} out of range: {avg_val:.1f} (Exp: {min_v}~{max_v})")
 
         log_summary = ", ".join(result_details)
+        params = {"log": log_summary}
+        for field_name, range_val in ranges.items():
+            target_field = f"{field_name}_raw" if any(f"{field_name}_raw" in s for s in samples) else field_name
+            vals = [s.get(target_field) for s in samples if target_field in s and s.get(target_field) is not None]
+            if vals:
+                params[field_name] = sum(vals) / len(vals)
+            else:
+                params[field_name] = 0.0
+
         if errors:
-            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": f"FAILED: {'; '.join(errors)} | Data: {log_summary}"}
+            res_log_fail = f"FAILED ({check_type}): " + "; ".join(errors) + f" | Data: {log_summary}"
+            params["log"] = res_log_fail
+            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": res_log_fail, "parameter": params}
         
-        return {"code": 0, "log": f"PASSED ({check_type}): {log_summary}"}
+        return {"code": 0, "log": f"PASSED ({check_type}): {log_summary}", "parameter": params}
 
 
 class RSDController(TestCase):
@@ -232,7 +317,15 @@ class RSDController(TestCase):
             
             time.sleep(0.1) # wait for settlement
             log_msg = f"RSD Set: RSD1={rsd1}, RSD2={rsd2}"
-            return {"code": 0, "log": log_msg}
+            return {
+                "code": 0, 
+                "log": log_msg,
+                "parameter": {
+                    "log": log_msg,
+                    "RSD1": rsd1,
+                    "RSD2": rsd2
+                }
+            }
         except Exception as e:
             return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"RSD control error: {e}"}
 
@@ -268,7 +361,9 @@ class DutyRatioTester(TestCase):
         initial_max_duty = mppt_status.get("max_duty")
         initial_bypass = mppt_status.get("bypass_condition", False)
         
-        max_pwm = initial_max_duty if initial_max_duty is not None else 2000
+        if initial_max_duty is None:
+            return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": "Failed to detect Max Duty from MPPT status. Check device connection."}
+        max_pwm = initial_max_duty
         logger.info(f"  --> Detected Max Duty: {max_pwm}")
 
         try:
@@ -281,6 +376,7 @@ class DutyRatioTester(TestCase):
             # 4-9. Set Duty and Check ADC
             duty_steps = [0.75, 0.50, 0.25]
             logs = []
+            duty_results = []
             
             for ratio in duty_steps:
                 target_duty = int(max_pwm * ratio)
@@ -316,12 +412,40 @@ class DutyRatioTester(TestCase):
                 tolerance = 0.15 * baseline_vout # 15% tolerance
                 
                 status = "OK" if abs(avg_vout - expected_v) < tolerance else "FAIL"
-                logs.append(f"Duty {ratio*100:.0f}%: Measured {avg_vout:.1f} (Exp: ~{expected_v:.1f}) -> {status}")
+                step_log = f"Duty {ratio*100:.0f}%: Measured {avg_vout:.1f} (Exp: ~{expected_v:.1f}) -> {status}"
+                logs.append(step_log)
+                duty_results.append({
+                    "ratio": ratio,
+                    "target_duty": target_duty,
+                    "measured_vout": avg_vout,
+                    "expected_vout": expected_v,
+                    "status": status
+                })
                 
                 if status == "FAIL":
-                    return {"code": E_ADC_VERIFICATION_FAIL.code, "log": " | ".join(logs)}
+                    log_summary = " | ".join(logs)
+                    return {
+                        "code": E_DUTY_RATIO_VERIFICATION_FAIL.code, 
+                        "log": log_summary,
+                        "parameter": {
+                            "log": log_summary,
+                            "baseline_vout": baseline_vout,
+                            "max_pwm": max_pwm,
+                            "steps": duty_results
+                        }
+                    }
 
-            return {"code": 0, "log": " | ".join(logs)}
+            log_summary = " | ".join(logs)
+            return {
+                "code": 0, 
+                "log": log_summary,
+                "parameter": {
+                    "log": log_summary,
+                    "baseline_vout": baseline_vout,
+                    "max_pwm": max_pwm,
+                    "steps": duty_results
+                }
+            }
 
         finally:
             logger.info("  --> Restoring initial MPPT configuration...")
@@ -336,10 +460,6 @@ class DutyRatioTester(TestCase):
             )
             g.bridge.enable_mppt(target_id, stick_uid, enable=initial_mppt, logger=logger)
 
-        # Finish: Disable MPPT (optional, maybe leave it to the user?)
-        # User requested sequence ends at point 9.
-        
-        return {"code": 0, "log": " | ".join(logs)}
 
 
 def run_steps_sequentially(

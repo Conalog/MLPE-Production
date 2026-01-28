@@ -53,7 +53,7 @@ class Stage3Config:
         return cls(
             jig_config_path=jig_config_path,
             io_config_path=io_config_path,
-            server_config_path=server_config_path,
+                server_config_path=server_config_path,
             tm1637_dio=io_pins.tm1637_dio,
             tm1637_clk=io_pins.tm1637_clk,
             relay_pin=io_pins.relay_pin,
@@ -174,7 +174,7 @@ def run_stage3(cfg: Stage3Config) -> int:
         })
     log_event(logger, event="stage3.boot", stage="stage3", data=boot_data)
     
-    # --- Phase 2: Hardware Self-Test ---
+    # --- Phase 3: Hardware Self-Test ---
     while not stop_requested:
         io.set_loading(led_color="yellow")
         results = run_self_test(
@@ -235,10 +235,13 @@ def run_stage3(cfg: Stage3Config) -> int:
             # [DDT] Reload vendor/product from jig.json for dynamic board switching
             try:
                 from common.config_utils import load_json, parse_jig_config
-                current_jig_cfg = parse_jig_config(load_json(cfg.jig_config_path))
+                jig_cfg_raw = load_json(cfg.jig_config_path)
+                current_jig_cfg = parse_jig_config(jig_cfg_raw)
                 current_vendor = current_jig_cfg.vendor
                 current_product = current_jig_cfg.product
                 current_adc_scales = current_jig_cfg.adc_scales
+                current_label_cfg = jig_cfg_raw.get("label", {})
+                
                 # Update IOThread scales if they changed
                 io._adc_scales = current_adc_scales
                 logger.info(f">>> Current Board: {current_vendor} / {current_product}")
@@ -246,6 +249,7 @@ def run_stage3(cfg: Stage3Config) -> int:
                 logger.warning(f"Failed to reload jig.json: {e}. Using initial config.")
                 current_vendor = cfg.vendor
                 current_product = cfg.product
+                current_label_cfg = {}
 
             # ADC 설정 로드
             try:
@@ -257,7 +261,7 @@ def run_stage3(cfg: Stage3Config) -> int:
 
             from .steps import run_stage_test
 
-            # 3단계 양산 시퀀스 실행
+            # 1단계 양산 시퀀스 실행
             results = run_stage_test(
                 logger=logger,
                 io=io,
@@ -267,7 +271,8 @@ def run_stage3(cfg: Stage3Config) -> int:
                 stage_name="stage3",
                 adc_config=adc_config,
                 relay_pin=cfg.relay_pin,
-                relay_active_high=cfg.relay_active_high
+                relay_active_high=cfg.relay_active_high,
+                label_config=current_label_cfg
             )
 
             # 서버 로그 전송 (성공/실패 상관없이 시퀀스 종료 시 한 번만)

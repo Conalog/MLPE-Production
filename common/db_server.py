@@ -172,14 +172,25 @@ class TestDBServer(DBServer):
                     # 2. 없으면 레코드 속성(Top-level)에서 찾음
                     return getattr(record, key, default)
 
-                data = {
-                    "jig_id": getattr(record, "jig", jig_id),
-                    "vendor": get_val("vendor", ""),
-                    "product": get_val("product", ""),
-                    "stage": int(get_val("stage", 1)),
-                    "timezone": get_val("timezone", "Asia/Seoul"),
-                    "adc_scales": get_val("adc_scales", [6.0, 2.0, 1.0, 1.0]),
-                }
+                # Start with everything from the 'config' field
+                data = {}
+                if isinstance(c_field, dict):
+                    data.update(c_field)
+
+                # Ensure critical top-level fields are present and correctly typed
+                data["jig_id"] = getattr(record, "jig", data.get("jig_id", jig_id))
+                
+                # Helper to get value with record fallback
+                def get_val(key, default):
+                    if key in data: return data[key]
+                    return getattr(record, key, default)
+
+                data["vendor"] = get_val("vendor", data.get("vendor", ""))
+                data["product"] = get_val("product", data.get("product", ""))
+                data["stage"] = int(get_val("stage", data.get("stage", 1)))
+                data["timezone"] = get_val("timezone", data.get("timezone", "Asia/Seoul"))
+                data["adc_scales"] = get_val("adc_scales", data.get("adc_scales", [6.0, 2.0, 1.0, 1.0]))
+
                 return data
             return None
         except Exception as e:

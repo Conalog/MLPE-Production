@@ -27,14 +27,22 @@ from common.error_codes import (
 class VoltageChecker(TestCase):
     def run(self, args: dict[str, Any]) -> dict[str, Any]:
         io = args["io"]
-        v12, v33 = io.read_voltages()
+        vd = io.read_voltages_detailed()
+        v12, v33 = vd["12V_calc"], vd["3.3V_calc"]
         
+        log_msg = f"Voltages OK: 12V={v12:.2f}V, 3.3V={v33:.2f}V"
+        res = {"code": 0, "log": log_msg, "parameter": {"log": log_msg, "value": vd}}
+
         if not (11.0 <= v12 <= 13.5):
-            return {"code": E_VOLTAGE_12V_OUT_OF_RANGE.code, "log": f"12V out of range: {v12:.2f}V"}
+            res.update({"code": E_VOLTAGE_12V_OUT_OF_RANGE.code, "log": f"12V out of range: {v12:.2f}V"})
+            res["parameter"]["log"] = res["log"]
+            return res
         if not (3.0 <= v33 <= 3.6):
-            return {"code": E_VOLTAGE_3V3_OUT_OF_RANGE.code, "log": f"3.3V out of range: {v33:.2f}V"}
+            res.update({"code": E_VOLTAGE_3V3_OUT_OF_RANGE.code, "log": f"3.3V out of range: {v33:.2f}V"})
+            res["parameter"]["log"] = res["log"]
+            return res
             
-        return {"code": 0, "log": f"Voltages OK: 12V={v12:.2f}V, 3.3V={v33:.2f}V"}
+        return res
 
 
 class DeviceRecognizer(TestCase):
@@ -82,7 +90,8 @@ class DeviceRecognizer(TestCase):
             addr = ficr_dict.get("device_addr", "000000000000")
             g.target_device.device_id = addr.upper() # Full 6-byte address
             
-            return {"code": 0, "log": f"Device recognized: {g.target_device.device_id}"}
+            log_msg = f"Device recognized: {g.target_device.device_id}"
+            return {"code": 0, "log": log_msg, "parameter": {"log": log_msg, "ID": g.target_device.device_id}}
             
         except Exception as e:
             return {"code": E_DEVICE_RECOGNITION_FAIL.code, "log": f"Recognition error: {str(e)}"}
@@ -115,7 +124,18 @@ class FirmwareDownloader(TestCase):
             with open(app_path, "wb") as f: f.write(app_bin)
             args["boot_path"] = boot_path
             args["app_path"] = app_path
-            return {"code": 0, "log": f"Downloaded Bootloader({boot_ver}) and App({app_ver})"}
+            log_msg = f"Downloaded Bootloader({boot_ver}) and App({app_ver})"
+            boot_info = {"name": "bootloader", "version": boot_ver}
+            app_info = {"name": "application", "version": app_ver}
+            return {
+                "code": 0, 
+                "log": log_msg, 
+                "parameter": {
+                    "log": log_msg,
+                    "bootloader": boot_info,
+                    "application": app_info
+                }
+            }
         except Exception as e:
             return {"code": E_FIRMWARE_DOWNLOAD_FAIL.code, "log": f"Save error: {str(e)}"}
 
@@ -124,28 +144,63 @@ class FirmwareUploader(TestCase):
     def run(self, args: dict[str, Any]) -> dict[str, Any]:
         boot_path = args["boot_path"]
         app_path = args["app_path"]
+        logger = args.get("logger")
         
+        def run_with_retry(cmd_list, name, max_retries=3):
+            last_err = None
+            for i in range(max_retries):
+                try:
+                    if i > 0:
+                        logger.warning(f"  --> Retrying {name} (attempt {i+1}/{max_retries})...")
+                        time.sleep(0.5)
+                    subprocess.run(cmd_list, check=True, timeout=30.0, capture_output=True)
+                    return True, None
+                except Exception as e:
+                    last_err = e
+                    err_output = ""
+                    if hasattr(e, "stderr") and e.stderr:
+                        err_output = e.stderr.decode()
+                    logger.debug(f"      {name} attempt {i+1} failed: {str(e)} {err_output}")
+            return False, last_err
+
         try:
             # Erase
-            subprocess.run(["probe-rs", "erase", "--chip", "nRF52810_xxAA", "--speed", "2000"], check=True, timeout=20.0, capture_output=True)
+            success, err = run_with_retry([
+                "probe-rs", "erase", "--chip", "nRF52810_xxAA", "--speed", "2000"
+            ], "Erase")
+            if not success:
+                return {"code": E_FIRMWARE_UPLOAD_FAIL.code, "log": f"Erase error after retries: {str(err)}"}
             
             # Flash App 1, App 2, Boot
             commands = [ (app_path, "0x4000", "app"), (app_path, "0x21000", "app"), (boot_path, "0x0", "bootloader") ]
             logs = []
             for path, addr, name in commands:
-                subprocess.run([
+                success, err = run_with_retry([
                     "probe-rs", "download", path, "--chip", "nRF52810_xxAA", 
                     "--speed", "2000",
                     "--binary-format", "bin", "--base-address", addr
-                ], check=True, timeout=30.0, capture_output=True)
+                ], f"Download {name} at {addr}")
+                
+                if not success:
+                    return {"code": E_FIRMWARE_UPLOAD_FAIL.code, "log": f"Download {name} error at {addr}: {str(err)}"}
+                
                 logs.append(f"Flash successful: {name} binary at {addr}")
                 if addr == "0x0": time.sleep(0.3)
             
             # Reset
             subprocess.run(["probe-rs", "reset", "--chip", "nRF52810_xxAA"], timeout=10.0, capture_output=True)
-            return {"code": 0, "log": "\n".join(logs)}
+            log_msg = "\n".join(logs)
+            return {
+                "code": 0, 
+                "log": log_msg,
+                "parameter": {
+                    "log": log_msg,
+                    "bootloader": {"addr": "0x0"},
+                    "application": {"addr": "0x4000, 0x21000"}
+                }
+            }
         except Exception as e:
-            return {"code": E_FIRMWARE_UPLOAD_FAIL.code, "log": f"Upload error: {str(e)}"}
+            return {"code": E_FIRMWARE_UPLOAD_FAIL.code, "log": f"Upload process error: {str(e)}"}
 
 
 class CommTester(TestCase):
@@ -168,7 +223,16 @@ class CommTester(TestCase):
                     # 전역 MLPE 상태 업데이트
                     g.target_device.info = info
                     args["stick_uid"] = uid # ADC Tester에서 필요할 수 있지만 일단 globals에 넣을까 고민 중
-                    return {"code": 0, "log": f"Comm verified via {uid} (ID: {device_id_hex})"}
+                    log_msg = f"Comm verified via {uid} (ID: {device_id_hex})"
+                    return {
+                        "code": 0, 
+                        "log": log_msg,
+                        "parameter": {
+                            "log": log_msg,
+                            "version": info.get("version_unpacked", "Unknown"),
+                            "uptime": info.get("uptime", 0)
+                        }
+                    }
             time.sleep(0.7)
             
         return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"Device {device_id_hex} did not respond to REQ_GET_INFO"}
@@ -191,7 +255,15 @@ class RSDController(TestCase):
             
             time.sleep(0.1) # wait for settlement
             log_msg = f"RSD Set: RSD1={rsd1}, RSD2={rsd2}"
-            return {"code": 0, "log": log_msg}
+            return {
+                "code": 0, 
+                "log": log_msg,
+                "parameter": {
+                    "log": log_msg,
+                    "RSD1": rsd1,
+                    "RSD2": rsd2
+                }
+            }
         except Exception as e:
             return {"code": E_DEVICE_COMMUNICATION_FAIL.code, "log": f"RSD control error: {e}"}
 
@@ -248,10 +320,22 @@ class ADCResultChecker(TestCase):
                 errors.append(f"{field_name} out of range: {avg_val:.1f} (Exp: {min_v}~{max_v})")
 
         res_log = ", ".join(result_details)
+        params = {"log": res_log}
+        for field_name, range_val in ranges.items():
+            # Get average from result_details parsing or recalculate
+            target_field = f"{field_name}_raw" if any(f"{field_name}_raw" in s for s in samples) else field_name
+            vals = [s.get(target_field) for s in samples if target_field in s and s.get(target_field) is not None]
+            if vals:
+                params[field_name] = sum(vals) / len(vals)
+            else:
+                params[field_name] = 0.0
+
         if errors:
-            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": f"FAILED ({check_type}): " + "; ".join(errors)}
+            res_log_fail = f"FAILED ({check_type}): " + "; ".join(errors)
+            params["log"] = res_log_fail
+            return {"code": E_ADC_VERIFICATION_FAIL.code, "log": res_log_fail, "parameter": params}
         else:
-            return {"code": 0, "log": f"PASSED ({check_type}): {res_log}"}
+            return {"code": 0, "log": f"PASSED ({check_type}): {res_log}", "parameter": params}
 
 
 class MeshConfigurator(TestCase):
@@ -268,7 +352,28 @@ class MeshConfigurator(TestCase):
         if resp is None:
             return {"code": E_MESH_CONFIG_FAIL.code, "log": f"Mesh config timeout: No response from {target_id}"}
             
-        return {"code": 0, "log": f"Mesh config updated for {target_id}"}
+        l1 = resp.get("l1", {})
+        l2 = resp.get("l2", {})
+        l3 = resp.get("l3", {})
+
+        # Normalize fields for logging
+        if "tx_pwr" in l1 and "txPwr" not in l1: l1["txPwr"] = l1["tx_pwr"]
+        if "asp_interval" in l2 and "aspInterval" not in l2: l2["aspInterval"] = l2["asp_interval"]
+        if "mesh_group_id" in l3 and "meshGroupId" not in l3: l3["meshGroupId"] = l3["mesh_group_id"]
+        if "relay_option" in l3 and "relayOption" not in l3: l3["relayOption"] = l3["relay_option"]
+        if "relay_ratio" in l3 and "relayRatio" not in l3: l3["relayRatio"] = l3["relay_ratio"]
+
+        log_msg = f"Mesh config updated for {target_id}"
+        return {
+            "code": 0, 
+            "log": log_msg,
+            "parameter": {
+                "log": log_msg,
+                "l1": l1,
+                "l2": l2,
+                "l3": l3
+            }
+        }
 
 
 def run_steps_sequentially(
@@ -334,6 +439,7 @@ def run_stage_test(
         ("Firmware Downloader", FirmwareDownloader()),
         ("Firmware Uploader", FirmwareUploader()),
         ("Comm Tester", CommTester()),
+        # TODO: FicrUpdater => Board에 대한 정보를 UICR에 저장
     ]
     
     context = {

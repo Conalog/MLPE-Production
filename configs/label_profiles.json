@@ -1,0 +1,50 @@
+{
+  "conalog_standard_label": {
+    "printer_settings": {
+      "brightness": 25,
+      "print_speed": 2,
+      "slew_speed": 2,
+      "backfeed_speed": 2,
+      "label_home_x": 5,
+      "label_home_y": 15,
+      "feed_action_at_power_up": 70,
+      "feed_action_after_closing_print_head": 70,
+      "paper_size_width_mm": 40,
+      "paper_size_height_mm": 25,
+      "paper_size_dpi": 300
+    },
+    "layout": {
+      "items": [
+        {"type": "qr", "pos": [10, 5], "size_mm": 20, "data_key": "qr_text"}
+      ]
+    }
+  },
+  "nanoom_standard_label": {
+    "printer_settings": {
+      "brightness": 25,
+      "print_speed": 2,
+      "slew_speed": 2,
+      "backfeed_speed": 2,
+      "label_home_x": 0,
+      "label_home_y": 15,
+      "feed_action_at_power_up": 70,
+      "feed_action_after_closing_print_head": 70,
+      "paper_size_width_mm": 70,
+      "paper_size_height_mm": 35,
+      "paper_size_dpi": 300
+    },
+    "layout": {
+      "items": [
+        {"type": "text", "pos": [60, 15], "font": "big", "data_key": "device_id", "bold": true},
+        {"type": "text", "pos": [40, 90], "font": "mid", "prefix": "인증자: ", "data_key": "company", "bold": true},
+        {"type": "text", "pos": [40, 135], "font": "mid", "prefix": "모델명: ", "data_key": "model", "bold": true},
+        {"type": "text", "pos": [40, 180], "font": "mid", "prefix": "제조년월: ", "data_key": "yyyymm", "bold": true},
+        {"type": "logo", "pos": [40, 236], "size_mm": [14, 14], "path": "images/kc.png"},
+        {"type": "text", "pos": [160, 251], "font": "small", "data_key": "kc_no_line1", "bold": true},
+        {"type": "text", "pos": [160, 286], "font": "small", "data_key": "kc_no_line2", "bold": true},
+        {"type": "text", "pos": [160, 321], "font": "small", "prefix": "Made in ", "data_key": "nation", "bold": true},
+        {"type": "qr", "pos": [-10, 15], "size_mm": 33, "data_key": "qr_text"}
+      ]
+    }
+  }
+}

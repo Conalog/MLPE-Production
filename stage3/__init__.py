@@ -1,3 +1,2 @@
-from .app import run_stage3
+"""Stage 2: 최종 조립 및 검증 (Raspberry Pi 전용 실행)."""
 
-__all__ = ["run_stage3"]
