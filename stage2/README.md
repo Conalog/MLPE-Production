@@ -41,16 +41,15 @@ flowchart TD
         direction TB
         C_Start((시퀀스 시작))
         C_Neighbor{"1. 주변 장치 인식 (RSSI)"}
-        C_Verify{"2. 장비 정합성 검증"}
-        C_ADC_Pre{"3. ADC 확인 (Relay OFF)"}
-        C_Relay_ON["4. Relay ON (RSD 해제)"]
-        C_ADC_Post{"5. ADC 확인 (Relay ON)"}
-        C_RSD1{"6-1. RSD1 ON"}
-        C_ADC_RSD1{"6-2. ADC 확인 (RSD1)"}
-        C_RSD2{"6-3. RSD1+2 ON"}
-        C_ADC_RSD2{"6-4. ADC 확인 (RSD1+2)"}
-        C_RSD_OFF{"6-5. RSD All OFF"}
-        C_Relay_OFF["7. Relay OFF (안전)"]
+        C_ADC_Pre{"2. ADC 확인 (Relay OFF)"}
+        C_Relay_ON["3. Relay ON (RSD 해제)"]
+        C_ADC_Post{"4. ADC 확인 (Relay ON)"}
+        C_RSD1{"5-1. RSD1 ON"}
+        C_ADC_RSD1{"5-2. ADC 확인 (RSD1)"}
+        C_RSD2{"5-3. RSD1+2 ON"}
+        C_ADC_RSD2{"5-4. ADC 확인 (RSD1+2)"}
+        C_RSD_OFF{"5-5. RSD All OFF"}
+        C_Relay_OFF["6. Relay OFF (안전)"]
         
         C_Result["결과 서버 전송 및 로그 기록"]
         C_Fail["에러 표시 (Red LED) & 버튼 대기"]
@@ -58,8 +57,7 @@ flowchart TD
 
         C_Start --> C_Neighbor
         
-        C_Neighbor -- OK --> C_Verify
-        C_Verify -- OK --> C_ADC_Pre
+        C_Neighbor -- OK --> C_ADC_Pre
         C_ADC_Pre -- OK --> C_Relay_ON
         C_Relay_ON -- OK --> C_ADC_Post
         C_ADC_Post -- OK --> C_RSD1
@@ -71,7 +69,6 @@ flowchart TD
         C_Relay_OFF --> C_Result
         
         C_Neighbor -- Fail --> C_Fail
-        C_Verify -- Fail --> C_Fail
         C_ADC_Pre -- Fail --> C_Fail
         C_Relay_ON -- Fail --> C_Fail
         C_ADC_Post -- Fail --> C_Fail
@@ -105,17 +102,19 @@ flowchart TD
 ## 2-3. 검증 시퀀스 상세 (버튼 동작)
 사용자가 테스트 버튼을 누르면 시작됩니다. Stage 2는 펌웨어 업로드 과정이 없으며, 주변 장치 검색 및 MLPE ADC Raw 데이터 검증을 수행합니다.
 
-1. **주변 장치 인식**: Neighbor List 초기화 후 일정 시간 대기, RSSI가 가장 낮은 장치를 타겟으로 자동 선택
-2. **장비 정합성 검증**: 선택된 장치가 현재 테스트 대상 보드가 맞는지 추가 검증(자리 마련)
-3. **ADC 확인 (Relay OFF)**: MLPE 내부 ADC Raw 값(Vin1, Vin2, Vout)이 설정된 범위 내에 있는지 확인
-4. **Relay ON**: 지그의 릴레이를 활성화하여 제품에 전원을 인가하고 RSD 상태를 변경할 준비 수행
-5. **ADC 확인 (Relay ON)**: 릴레이 활성화 직후의 ADC Raw 값 및 출력 전류(Iout) 확인
-6. **RSD 상태별 검증**: MQTT 명령을 통해 MLPE의 내부 RSD 상태를 변경하며 전압 변화 확인
+Stage 2/3는 유선 연결이 없으므로 주변 장치가 뿌리는 **비콘 데이터**를 기반으로 대상을 선택합니다.  
+선택 기준은 **Vendor/Product 타입** 일치 여부를 먼저 확인한 뒤 **RSSI**로 결정합니다.
+
+1. **주변 장치 인식**: Neighbor List 초기화 후 일정 시간 대기, Vendor/Product 타입이 일치하는 장치 중 RSSI가 가장 낮은 장치를 타겟으로 자동 선택
+2. **ADC 확인 (Relay OFF)**: MLPE 내부 ADC Raw 값(Vin1, Vin2, Vout)이 설정된 범위 내에 있는지 확인
+3. **Relay ON**: 지그의 릴레이를 활성화하여 제품에 전원을 인가하고 RSD 상태를 변경할 준비 수행
+4. **ADC 확인 (Relay ON)**: 릴레이 활성화 직후의 ADC Raw 값 및 출력 전류(Iout) 확인
+5. **RSD 상태별 검증**: MQTT 명령을 통해 MLPE의 내부 RSD 상태를 변경하며 전압 변화 확인
     - **RSD1 ON**: RSD1만 작동 시 전압 확인
     - **RSD1+2 ON**: 모든 RSD 작동 시 전압 확인
     - **RSD All OFF**: 모든 RSD 해제 상태로 복귀
-7. **Relay OFF**: 테스트 종료 후 안전을 위해 지그 릴레이를 다시 비활성화
-8. **결과 처리**: 모든 단계의 실행 로그를 서버로 전송
+6. **Relay OFF**: 테스트 종료 후 안전을 위해 지그 릴레이를 다시 비활성화
+7. **결과 처리**: 모든 단계의 실행 로그를 서버로 전송
 - **공통 사항**: 
     - 판정 기준은 `configs/adc_values.json`에서 통합 관리됩니다.
     - 모든 ADC 검증은 전압으로 변환되지 않은 **Raw ADC Count**를 기준으로 수행됩니다.

@@ -144,23 +144,6 @@ class NeighborScanner(TestCase):
             return {"code": E_DEVICE_RECOGNITION_FAIL.code, "log": f"Scanning error: {str(e)}"}
 
 
-class DeviceVerifier(TestCase):
-    """
-    Placeholder for '장비 정합성 검증'
-    Check if the selected device is actually the one currently on the jig.
-    """
-    def run(self, args: dict[str, Any]) -> dict[str, Any]:
-        target_id = g.target_device.device_id
-        if not target_id:
-            return {"code": E_NEIGHBOR_NOT_FOUND.code, "log": "No target device selected."}
-        
-        # Todo: Implement verification logic (e.g. checking specific HW pins or matching against expected ID)
-        time.sleep(0.5)
-        
-        log_msg = f"Device {target_id} verified"
-        return {"code": 0, "log": log_msg, "parameter": {"log": log_msg, "ID": target_id}}
-
-
 class CommTester(TestCase):
     """
     Check communication with the target device and get info (id_high).
@@ -712,7 +695,6 @@ def run_stage_test(
     
     common_steps = [
         ("Neighbor Scanner", NeighborScanner()),
-        ("Device Verifier", DeviceVerifier()),
         ("Communication Test", CommTester()),
     ]
     
